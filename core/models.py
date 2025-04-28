@@ -9,44 +9,83 @@ class Supplier(models.Model):
 
 
 class ClientOrder(models.Model):
+    """An Order made by a client.
+
+    ::note:
+        The 'total_price_thb' is at the change rate of 'date' 
+    """
+    order_no = models.IntegerField()
     client:Client = models.ForeignKey(Client, on_delete=models.CASCADE)
-    date = models.DateTimeField(auto_now_add=True)
-    total_price = models.DecimalField(max_digits=10, decimal_places=2)
-    shipping_address = models.TextField()
-
-    # Détails spécifiques à la commande client
-    shipping_method = models.CharField(max_length=20)
-    payment_status = models.CharField(max_length=20)
-
+    date = models.DateTimeField()
+    total_price_usd = models.DecimalField(max_digits=10, decimal_places=2)
+    # "At the rate when the command was made"
+    total_price_thb = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    total_weight = models.DecimalField(max_digits=4, decimal_places=2)
+    
     def __str__(self):
         return f"Client Order {self.id} - {self.client.name}"
 
 
 class SupplierOrder(models.Model):
-    supplier:Supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE)
-    date_created = models.DateTimeField(auto_now_add=True)
-    status = models.CharField(max_length=20)
-    total_price = models.DecimalField(max_digits=10, decimal_places=2)
-    delivery_address = models.TextField()
-
-    # Détails spécifiques à l'achat fournisseur
-    delivery_date = models.DateField()
-    payment_terms = models.CharField(max_length=50)
-
-    def __str__(self):
-        return f"Supplier Order {self.id} - {self.supplier.name}"
-
-
-class Gemstone(models.Model):
-    type = models.CharField(max_length=255)
-    weight = models.FloatField(verbose_name="weight per piece (ct)")
-    color = models.CharField(max_length=255, null=True)
+    """An order made to a supplier.
+    
+    ::note:
+        - THB rate at 'date'
+    """
+    client_memo = models.CharField(max_length=10, default="P", verbose_name="Purchase (P), Memo (M), Bargain (B)") # Purchase (P), Memo (M), Bargain (B) 
+    date = models.DateTimeField(auto_now_add=True)
+    book_no = models.IntegerField()
+    order_no = models.IntegerField()
+    tax_invoice = models.CharField(max_length=50, blank=True, null=True)
+    # supplier:Supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE)
+    supplier = models.CharField(max_length=50)
+    
+    # Stones 
     number = models.IntegerField()
+    stone = models.CharField(max_length=50)
+    heating = models.CharField(max_length=20, blank=True, null=True)  # H/NH
+    color = models.CharField(max_length=50, blank=True, null=True)
+    shape = models.CharField(max_length=50, blank=True, null=True)
+    cutting = models.CharField(max_length=50, blank=True, null=True)
+    size = models.CharField(max_length=50, blank=True, null=True)  # To be careful (Ex : 6x4, 2.3-2.4, 2.50)
+    carats = models.DecimalField(max_digits=10, decimal_places=3, verbose_name="Weight in carats")
     
-    client_order = models.ForeignKey("ClientOrder", null=True, blank=True, on_delete=models.CASCADE)
-    supplier_order = models.ForeignKey(SupplierOrder, null=True, blank=True, on_delete=models.CASCADE)
+    # Prices 
+    currency = models.CharField(max_length=5, default="THB")  # US/THB
+    price_cur_per_unit = models.DecimalField(max_digits=15, decimal_places=2)
+    unit = models.CharField(max_length=5, default="CT")
     
+    total_thb = models.DecimalField(max_digits=15, decimal_places=2)
+    
+    weight_per_piece = models.DecimalField(max_digits=10, decimal_places=3, blank=True, null=True)
+    
+    price_usd_per_ct = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    price_usd_per_piece = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    total_usd = models.DecimalField(max_digits=15, decimal_places=2, blank=True, null=True)
+    rate_avg_2019 = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    remarks = models.TextField(blank=True, null=True)
+    credit_term = models.CharField(max_length=50, blank=True, null=True)
+    target_size = models.CharField(max_length=50, blank=True, null=True)
+        
     def __str__(self):
-        return f"Gemstone {self.color} {self.type} x{self.number} of {self.weight} carats"
-    # Shape, cutting, size, ... 
+        return f"Supplier Order {self.order_no} - {self.supplier} - {self.date}"
+
+
+
+# LATER 
+
+# class Gemstone(models.Model):
+#     type = models.CharField(max_length=255)
+#     weight = models.DecimalField(max_digits=4, decimal_places=2, verbose_name="weight per piece (ct)")
+
+#     color = models.CharField(max_length=255, null=True)
+#     number = models.IntegerField()
+    
+#     client_order = models.ForeignKey(ClientOrder, null=True, blank=True, on_delete=models.CASCADE)
+#     supplier_order = models.ForeignKey(SupplierOrder, null=True, blank=True, on_delete=models.CASCADE)
+    
+#     def __str__(self):
+#         return f"Gemstone {self.color} {self.type} x{self.number} of {self.weight} carats"
+#     # Shape, cutting, size, ... 
     
