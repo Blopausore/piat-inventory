@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Import Supplier Orders</title>
+</head>
+<body>
+    <h1>Import Supplier Orders</h1>
+
+    <form id="uploadForm" method="POST" enctype="multipart/form-data" action="{% url 'supplier_orders_import_upload' %}">
+        {% csrf_token %}
+        <input type="file" name="file" accept=".xls,.xlsx" required>
+        <button type="submit">Upload</button>
+    </form>
+</body>
+</html>

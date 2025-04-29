@@ -33,8 +33,11 @@ class SupplierOrder(models.Model):
     ::note:
         - THB rate at 'date'
     """
+    class Meta:
+        unique_together = ('supplier', 'order_no', 'number', 'stone', 'shape', 'color', 'cutting', 'size', 'carats')
+
     client_memo = models.CharField(max_length=10, default="P", verbose_name="Purchase (P), Memo (M), Bargain (B)") # Purchase (P), Memo (M), Bargain (B) 
-    date = models.DateTimeField(auto_now_add=True)
+    date = models.DateTimeField()
     book_no = models.IntegerField()
     order_no = models.IntegerField()
     tax_invoice = models.CharField(max_length=50, blank=True, null=True)
