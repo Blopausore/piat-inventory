@@ -18,6 +18,7 @@ def supplier_orders_list(request):
     orders = SupplierOrder.objects.all().order_by('-date')
     return render(request, 'core/supplier_orders_table.html', {'orders': orders})
 
+
 def supplier_orders_json(request):
     """"""
     draw = int(request.GET.get('draw', 1))
@@ -60,34 +61,14 @@ def supplier_orders_json(request):
 
     data = []
     for order in page.object_list:
-        
-        data.append([
-            order.date.strftime('%Y-%m-%d') if order.date else '',
-            order.book_no,
-            order.order_no,
-            order.tax_invoice,
-            order.supplier,
-            order.number,
-            order.stone,
-            order.heating,
-            order.color,
-            order.shape,
-            order.cutting,
-            order.size,
-            str(order.carats),
-            order.currency,
-            str(order.price_cur_per_unit),
-            order.unit,
-            str(order.total_thb),
-            str(order.weight_per_piece),
-            str(order.price_usd_per_ct),
-            str(order.price_usd_per_piece),
-            str(order.total_usd),
-            str(order.rate_avg_2019),
-            order.remarks,
-            order.credit_term,
-            order.target_size,
-        ])
+        row = []
+        for (field, _) in SUPPLIER_ORDER_FIELDS:
+            value = getattr(order, field)
+            if field == "date":
+                value = value.strftime('%Y-%m-%d') if order.date else ''
+            
+            row.append(str(value) if value is not None else '')
+        data.append(row)
 
     return JsonResponse({
         'draw': draw,
@@ -172,4 +153,3 @@ def supplier_orders_import_upload(request):
     else:
         messages.error(request, "No file selected.")
         return redirect('supplier_orders_import_page')
-    
