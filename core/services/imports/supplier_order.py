@@ -1,12 +1,23 @@
+import math
+from decimal import Decimal, InvalidOperation
 from core.models import SupplierOrder
 from django.utils.dateparse import parse_date
 import pandas as pd
-import math
-
-# Test
-SupplierOrder.objects.all().delete()
 
 
+def safe_decimal(value, default=Decimal('0.0')):
+    """Convert to Decimal safely. Return default if value is invalid."""
+    if value is None:
+        return default
+    if isinstance(value, float) and math.isnan(value):
+        return default
+    try:
+        if isinstance(value, str):
+            value = ''.join(c for c in value if (c.isdigit() or c in '.-'))  # keep only digits, dot, minus
+        return Decimal(value)
+    except (InvalidOperation, ValueError):
+        return default
+    
 COLUMN_REQUIRED = {
     'order_no',
     'supplier',
@@ -81,47 +92,43 @@ def check_field(df: pd.DataFrame):
     #         (mapped_field in df.columns) for mapped_field in COLUMN_MAPPING.get(field)
     #     ):
     #         return False
-            
+    
+# Main Function
 
 def import_supplier_orders(file_path):
-    """ Import the suppliers orders that are in 'file_path'.
-    
-    It is based on the file '2024 - BUYING REPORT PIAT (CONFIRM) UPDATED.xls'
-    """
-    # report = {
-    #     "imported": 0,
-    #     "skipped_invalid": 0,
-    #     "skipped_canceled": 0,
-    #     "failed_rows": [],
-    #     "messages": [],
-    # }
+    """Import the suppliers orders that are in 'file_path'."""
+    report = {
+        "imported": 0,
+        "skipped_invalid": 0,
+        "skipped_canceled": 0,
+        "skipped_not_p": 0,
+        "failed_rows": [],
+        "messages": [],
+        "total": 0,
+    }
     sheets = pd.read_excel(file_path, sheet_name=None)
     achats = []
-
-    valid_order_counter = 0
-    canceled_order_counter = 0
-    
 
     for sheet_name, df in sheets.items():
         sheet_valid_order_counter = 0
         if not check_field(df):
+            report['messages'].append(f"[SKIP] Sheet '{sheet_name}' does not have required fields. Skipped.")
             continue
-        
-        print(f"[RUN] Process sheet : {sheet_name}")
-        
+
+        report['messages'].append(f"[RUN] Processing sheet: {sheet_name}")
+
         for index, row in df.iterrows():
             if is_fully_invalid_row(row):
                 continue
 
             if get_value(row, 'client_memo') in {"M", "B"}:
-                print(get_value(row, 'client_memo'))
+                report['skipped_not_p'] += 1
                 continue
-            
-            # Filtering invalid line
+
             if is_canceled(row):
-                # Order wich was canceled
+                report['skipped_canceled'] += 1
                 continue
-            
+
             try:
                 achat = SupplierOrder(
                     client_memo=get_value(row, 'client_memo') or "P",
@@ -137,11 +144,11 @@ def import_supplier_orders(file_path):
                     shape=get_value(row, 'shape'),
                     cutting=get_value(row, 'cutting'),
                     size=get_value(row, 'size'),
-                    carats=get_value(row, 'carats') or 0,
+                    carats=safe_decimal(get_value(row, 'carats')) or 0,
                     currency=get_value(row, 'currency') or "THB",
-                    price_cur_per_unit=get_value(row, 'price_cur_per_unit') or 0,
+                    price_cur_per_unit=safe_decimal(get_value(row, 'price_cur_per_unit')) or 0,
                     unit=get_value(row, 'unit') or "CT",
-                    total_thb=get_value(row, 'total_thb') or 0,
+                    total_thb=safe_decimal(get_value(row, 'total_thb')) or 0,
                     weight_per_piece=get_value(row, 'weight_per_piece'),
                     price_usd_per_ct=get_value(row, 'price_usd_per_ct'),
                     price_usd_per_piece=get_value(row, 'price_usd_per_piece'),
@@ -152,16 +159,32 @@ def import_supplier_orders(file_path):
                     target_size=get_value(row, 'target_size'),
                 )
                 achats.append(achat)
-                # achat.save()
-                sheet_valid_order_counter +=1
-                valid_order_counter +=1
+                report["imported"] += 1
+                sheet_valid_order_counter += 1
+
             except Exception as e:
-                print(f"[WARNING] Failed to import line {index} in sheet {sheet_name}")
-                print(f"\t{e}")
-                print(f"\t{row.values}")
-                
-        print(f"[DONE] Process sheet {sheet_name}, {sheet_valid_order_counter} was added")
+                report['skipped_invalid'] += 1
+                report['failed_rows'].append({
+                    "sheet": sheet_name,
+                    "row_index": index,
+                    "error": str(e),
+                    "row_data": row.values.tolist(),
+                })
+                report['messages'].append(
+                    f"[WARNING] Failed to import row {index} in sheet {sheet_name}: {str(e)}"
+                )
+
+        report['messages'].append(
+            f"[DONE] Finished processing sheet {sheet_name}: {sheet_valid_order_counter} rows added."
+        )
 
     SupplierOrder.objects.bulk_create(achats)
-    print()
-    return len(achats)
+
+    report["total"] = (
+        report['imported'] +
+        report["skipped_canceled"] +
+        report["skipped_invalid"] +
+        report['skipped_not_p']
+    )
+
+    return report

@@ -19,7 +19,15 @@ class Command(BaseCommand):
         self.stdout.write(self.style.WARNING(f"Importing supplier orders from {file_path}..."))
 
         try:
-            total_imported = import_supplier_orders(file_path)
-            self.stdout.write(self.style.SUCCESS(f"[DONE] Import completed. {total_imported} supplier orders inserted."))
+            report = import_supplier_orders(file_path)
+            
+            self.stdout.write(self.style.SUCCESS(
+                f"[DONE] Import completed. {report['imported']}/{report['total']} supplier orders inserted."
+            ))
+
+            self.stdout.write(f"[INFO] {len(report['failed_rows'])} rows failed to import.")
+            self.stdout.write(f"[INFO] {report['skipped_canceled']} canceled orders skipped.")
+            self.stdout.write(f"[INFO] {report['skipped_not_p']} non-purchase orders skipped.")
+
         except Exception as e:
             self.stderr.write(self.style.ERROR(f"[ERROR] An error occurred during import: {str(e)}"))
