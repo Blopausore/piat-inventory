@@ -2,11 +2,11 @@
 
 ## Tools
 
-- [ ] Import csv to model (sql)
-- [ ] Import excel to model (sql)
+- [X] Import excel to model (sql)
+- [X] Export excel to model (sql)
 
 - [ ] Export csv to model (sql)
-- [ ] Export excel to model (sql)
+- [ ] Import csv to model (sql)
 
 ## Verification 
 

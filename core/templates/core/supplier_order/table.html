@@ -1,0 +1,75 @@
+{% load static %}
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Supplier Orders</title>
+    
+    <!-- Librairies nécessaires -->
+    <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.13.5/css/jquery.dataTables.min.css">
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.5/js/jquery.dataTables.min.js"></script>
+
+    <!-- JS générique de table -->
+    <script src="{% static 'core/js/advanced_table.js' %}"></script>
+</head>
+<body>
+
+<h1>Supplier Orders</h1>
+
+<div style="margin-bottom: 20px;">
+    <button id="exportBtn">Export</button>
+    <button id="importBtn">Import</button>
+</div>
+
+{% comment %} <!-- Formulaire de filtres (optionnel) -->
+<form id="filtersForm" style="margin-bottom: 20px;">
+    <!-- Exemple -->
+    <label>Shape:</label>
+    <select name="shape">
+        <option value="">All</option>
+        <option value="round">Round</option>
+        <option value="oval">Oval</option>
+        <option value="oct">Octagon</option>
+    </select>
+    <button type="submit">Filter</button>
+</form> {% endcomment %}
+
+<!-- Tableau avec colonnes affichées -->
+<table id="ordersTable" class="display" style="width:100%">
+    {% include 'core/supplier_order/thead.html' %}
+    <tbody></tbody>
+</table>
+
+<script>
+    const table = initAdvancedTable({
+        selector: '#ordersTable',
+        filtersForm: '#filtersForm',
+        ajaxUrl: "{% url 'supplier_orders_json' %}",
+        updateUrl: "{% url 'supplier_order_update' %}",
+        csrfToken: '{{ csrf_token }}',
+        enableEditing: true,
+        columns: [
+            { name: "date" }, { name: "book_no" }, { name: "order_no" },
+            { name: "tax_invoice" }, { name: "supplier" }, { name: "number" },
+            { name: "stone" }, { name: "heating" }, { name: "color" },
+            { name: "shape" }, { name: "cutting" }, { name: "size" },
+            { name: "carats" }, { name: "currency" }, { name: "price_cur_per_unit" },
+            { name: "unit" }, { name: "total_thb" }, { name: "weight_per_piece" },
+            { name: "price_usd_per_ct" }, { name: "price_usd_per_piece" },
+            { name: "total_usd" }, { name: "rate_avg_2019" },
+            { name: "remarks" }, { name: "credit_term" }, { name: "target_size" },
+            { name: "id", visible: false, searchable: false } 
+        ]
+    });
+
+    $('#exportBtn').on('click', () => {
+        window.location.href = "{% url 'supplier_orders_export' %}";
+    });
+
+    $('#importBtn').on('click', () => {
+        window.location.href = "{% url 'supplier_orders_import_page' %}";
+    });
+</script>
+
+</body>
+</html>

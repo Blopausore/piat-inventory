@@ -5,54 +5,89 @@ from django.views.decorators.csrf import csrf_exempt
 
 
 
-def orders_json(request, model, display_fields, search_fields=None, default_order_field='date'):
-    """Generic DataTables JSON API."""
-    draw = int(request.GET.get('draw', 1))
-    start = int(request.GET.get('start', 0))
-    length = int(request.GET.get('length', 10))
+# core/views/wrapper_order/api.py
 
-    # Build ordering
-    order_column_index = request.GET.get('order[0][column]')
-    order_direction = request.GET.get('order[0][dir]')
+from django.core.paginator import Paginator
+from django.db.models import Q
+from django.http import JsonResponse
+from django.utils.dateparse import parse_datetime
+
+def orders_json(
+    request,
+    model,
+    display_fields,
+    search_fields=None,
+    related_search_fields=None,
+    filter_conditions=None,
+    default_order_field="date"
+):
+    """
+    Generic, production-ready JSON response for DataTables.
+    Supports:
+    - Pagination
+    - Sorting by column
+    - Search across fields (including ForeignKey)
+    - Custom filtering
+    """
+
+    draw = int(request.GET.get("draw", 1))
+    start = int(request.GET.get("start", 0))
+    length = int(request.GET.get("length", 10))
+
+    # Column ordering
+    order_column_index = request.GET.get("order[0][column]")
+    order_direction = request.GET.get("order[0][dir]")
     field_map = {index: field for index, (field, _) in enumerate(display_fields)}
 
     order_column = field_map.get(int(order_column_index), default_order_field) if order_column_index else default_order_field
-    if order_direction == 'desc':
-        order_column = '-' + order_column
+    if order_direction == "desc":
+        order_column = f"-{order_column}"
 
     queryset = model.objects.all()
 
-    # Search
-    search_value = request.GET.get('search[value]', '')
-    if search_value and search_fields:
+    # Global search
+    search_value = request.GET.get("search[value]", "")
+    if search_value:
         q_objects = Q()
-        for field in search_fields:
-            q_objects |= Q(**{f"{field}__icontains": search_value})
+
+        if search_fields:
+            for field in search_fields:
+                q_objects |= Q(**{f"{field}__icontains": search_value})
+
+        if related_search_fields:
+            for related_field in related_search_fields:
+                q_objects |= Q(**{f"{related_field}__icontains": search_value})
+
         queryset = queryset.filter(q_objects)
 
-    queryset = queryset.order_by(order_column)
+    # Custom filters (e.g., ?status=paid)
+    if filter_conditions:
+        for key, value in filter_conditions.items():
+            if value:
+                queryset = queryset.filter(**{key: value})
 
+    queryset = queryset.order_by(order_column)
     paginator = Paginator(queryset, length)
     page_number = start // length + 1
     page = paginator.page(page_number)
 
+    # Output
     data = []
     for obj in page.object_list:
         row = []
         for field, _ in display_fields:
             value = getattr(obj, field, '')
-            if field == "date" and value:
-                value = value.strftime('%Y-%m-%d')
+            if hasattr(value, "strftime"):
+                value = value.strftime("%Y-%m-%d")
             row.append(str(value) if value is not None else '')
         data.append(row)
 
     return JsonResponse({
-        'draw': draw,
-        'recordsTotal': model.objects.count(),
-        'recordsFiltered': queryset.count(),
-        'data': data
+        "draw": draw,
+        "recordsTotal": model.objects.count(),
+        "recordsFiltered": queryset.count(),
+        "data": data,
     })
-    
 
 
 @csrf_exempt
