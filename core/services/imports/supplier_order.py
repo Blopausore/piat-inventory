@@ -3,9 +3,9 @@ import pandas as pd
 from django.utils.dateparse import parse_date
 from django.db import IntegrityError
 
-from core.mappings.supplier_order import SUPPLIER_COLUMN_MAPPING
+from core.mappings import SUPPLIER_COLUMN_MAPPING
 from core.models import SupplierOrder
-from core.tools.parse import safe_parse_date, safe_decimal, safe_parse_int
+from core.tools.parse import safe_parse_date, safe_decimal, safe_parse_int, parse_currency
 from core.tools.row import get_value_mapped, is_fully_invalid_row, is_duplicate_object
 
 
@@ -97,7 +97,7 @@ def import_supplier_orders(file_path):
                     cutting=get_value(row, 'cutting'),
                     size=get_value(row, 'size'),
                     carats=safe_decimal(get_value(row, 'carats')) or 0,
-                    currency=get_value(row, 'currency') or "THB",
+                    currency=parse_currency(get_value(row, 'currency') or "THB"),
                     price_cur_per_unit=safe_decimal(get_value(row, 'price_cur_per_unit')) or 0,
                     unit=get_value(row, 'unit') or "CT",
                     total_thb=safe_decimal(get_value(row, 'total_thb')) or 0,

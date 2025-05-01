@@ -7,7 +7,6 @@ class Client(models.Model):
 class Supplier(models.Model):
     name = models.CharField(max_length=255)
 
-
 class ClientOrder(models.Model):
     """An Order made by a client.
 
@@ -68,6 +67,7 @@ class SupplierOrder(models.Model):
     
     # Prices 
     currency = models.CharField(max_length=5, default="THB")  # US/THB
+    e = models.Choices
     price_cur_per_unit = models.DecimalField(max_digits=15, decimal_places=2)
     unit = models.CharField(max_length=5, default="CT")
     

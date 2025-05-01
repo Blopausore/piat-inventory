@@ -57,3 +57,4 @@ SUPPLIER_COLUMN_MAPPING = {
     'credit_term': ['CREDIT TERM', 'Credit Term'],
     'target_size': ['Target size', 'Target Size'],
 }
+

@@ -19,6 +19,7 @@
 <div style="margin-bottom: 20px;">
     <button id="exportBtn">Export</button>
     <button id="importBtn">Import</button>
+    <button id="fillPricesBtn">Fill price</button>
 </div>
 
 {% comment %} <!-- Formulaire de filtres (optionnel) -->
@@ -69,6 +70,37 @@
     $('#importBtn').on('click', () => {
         window.location.href = "{% url 'supplier_orders_import_page' %}";
     });
+
+    // Assurez-vous que jQuery est chargé
+
+    $('#fillPricesBtn').on('click', () => {
+    if (!confirm("Are you sure you want to fill missing USD prices for all orders?")) {
+        return;
+    }
+    const csrftoken = '{{ csrf_token }}';
+    $.ajax({
+        url: "{% url 'supplier_orders_fill_prices' %}",
+        method: "POST",
+        headers: { "X-CSRFToken": csrftoken },
+        data: {
+            dry_run: false,
+            verbose: true
+        },
+        success: function(report) {
+            let msg = `Processed ${report.to_update} orders, updated ${report.updated}.`;
+            if (report.errors && report.errors.length) {
+                msg += `\n${report.errors.length} errors occurred.`;
+            }
+            alert(msg);
+            // Optionnel : recharger la table pour voir les nouveaux prix
+            table.ajax.reload();
+        },
+        error: function(xhr) {
+            alert("Error: " + xhr.responseJSON.error || xhr.statusText);
+        }
+    });
+});
+
 
 </script>
 

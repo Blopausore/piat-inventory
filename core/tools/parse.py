@@ -3,6 +3,8 @@ from decimal import Decimal, InvalidOperation
 from django.utils import timezone
 import pandas as pd
 
+from core.mappings import CURRENCY_MAPPING
+from core.models.choices import Currency
 
 def safe_parse_int(value): 
     if isinstance(value, str):
@@ -55,3 +57,19 @@ def safe_decimal(value, default=Decimal('0.0')):
     except (InvalidOperation, ValueError):
         return default
 
+
+def parse_currency(raw: str) -> Currency:
+    """
+    Normalize a notation for a currency
+    """
+    if not raw:
+        raise ValueError("No currency provided")
+    txt = raw.strip().upper()
+
+    if txt in CURRENCY_MAPPING.keys():
+        return Currency(txt)
+
+    for canon, aliases in CURRENCY_MAPPING.items():
+        if txt in aliases:
+            return Currency(canon)
+    raise ValueError(f"Unknown currency: '{raw}'")
