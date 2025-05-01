@@ -40,6 +40,7 @@ class SupplierOrder(models.Model):
     carats = models.DecimalField(max_digits=10, decimal_places=3, verbose_name="Weight in carats")
     
     # Prices 
+    # RAW
     currency = models.CharField(
         max_length=3,
         choices=Currency.choices,
@@ -50,11 +51,15 @@ class SupplierOrder(models.Model):
     
     total_thb = models.DecimalField(max_digits=15, decimal_places=2)
     
+    # CT, PC & $$ 
     weight_per_piece = models.DecimalField(max_digits=10, decimal_places=3, blank=True, null=True)
     
-    price_usd_per_ct = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     price_usd_per_piece = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     total_usd = models.DecimalField(max_digits=15, decimal_places=2, blank=True, null=True)
+    # if possible
+    price_usd_per_ct = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    
+    # Additional informations
     rate_avg_2019 = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     remarks = models.TextField(blank=True, null=True)
     credit_term = models.CharField(max_length=50, blank=True, null=True)

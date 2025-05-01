@@ -1,13 +1,17 @@
 # core/services/tools/order_pricing.py
 
 import logging
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from django.db.models import Q
 
-from exchange_rate.services.conversion import convert_to_usd, CurrencyConversionError
 from core.models import SupplierOrder
+from core.tools.parse import parse_unit
+from exchange_rate.services.conversion import convert_to_usd, CurrencyConversionError
+
 
 logger = logging.getLogger(__name__)
+
+CARAT_IN_GRAM = Decimal('0.2')
 
 class MissingPriceFiller:
     """
@@ -62,35 +66,72 @@ class MissingPriceFiller:
 
         return report
 
+    def _normalize_local_price(self, order: SupplierOrder) -> Decimal:
+        """
+        Return the standardized local price per carat based on order.unit,
+        now handling CT, PC, TOTAL, G (gram) and KG (kilogram).
+        """
+        unit = parse_unit(order.unit)
+        price = Decimal(order.price_cur_per_unit)
+
+        if unit == 'CT':
+            # already price per carat
+            per_ct = price
+
+        elif unit == 'PC':
+            # price per piece → price per carat
+            if not order.weight_per_piece:
+                raise ValueError(f"Missing weight_per_piece for unit '{unit}' on order {order.id}")
+            per_ct = price / Decimal(order.weight_per_piece)
+
+        elif unit == 'TOTAL':
+            # total price → price per carat
+            if order.carats == 0:
+                raise ValueError(f"Missing carats for TOTAL unit on order {order.id}")
+            per_ct = price / Decimal(order.carats)
+
+        elif unit == 'G':
+            # price per gram → price per carat
+            per_ct = price * CARAT_IN_GRAM
+
+        elif unit == 'KG':
+            # price per kilogram → price per carat
+            # price per gram = price / 1000
+            per_ct = (price / Decimal('1000')) * CARAT_IN_GRAM
+
+        else:
+            raise ValueError(f"Unknown unit '{unit}' on order {order.id}")
+
+        return per_ct.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def _to_usd(self, local_amount: Decimal, order: SupplierOrder) -> Decimal:
+        """
+        Convert a local currency amount to USD, rounded to 2 decimals.
+        """
+        if order.currency.upper() == 'USD':
+            return local_amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        usd_amount = convert_to_usd(local_amount, order.date, from_currency=order.currency)
+        return usd_amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
     def _fill_order(self, order: SupplierOrder):
         """
-        Calcule et assigne :
-         - price_usd_per_ct
-         - price_usd_per_piece = price_usd_per_ct * weight_per_piece (ou nombre)
-         - total_usd = price_usd_per_ct * carats (ou price_usd_per_piece * number)
+        Populate price_usd_per_ct, price_usd_per_piece, and total_usd fields.
         """
-        # 1) USD price per unit
-        if order.currency.upper() == "USD":
-            usd_per_ct = order.price_cur_per_unit
-        else:
-            usd_per_ct = convert_to_usd(
-                order.price_cur_per_unit,
-                order.date,
-                from_currency=order.currency,
-            )
+        # 1) Compute local price per carat
+        local_per_ct = self._normalize_local_price(order)
+
+        # 2) Convert to USD per carat
+        usd_per_ct = self._to_usd(local_per_ct, order)
         order.price_usd_per_ct = usd_per_ct
 
-        # 2) USD price per piece (si weight_per_piece renseigné)
+        # 3) Compute USD price per piece if weight_per_piece is provided
         if order.weight_per_piece:
-            order.price_usd_per_piece = (usd_per_ct * Decimal(order.weight_per_piece)).quantize(Decimal('0.01'))
+            usd_per_piece = usd_per_ct * Decimal(order.weight_per_piece)
+            order.price_usd_per_piece = usd_per_piece.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         else:
             order.price_usd_per_piece = None
 
-        # 3) total USD
-        # on calcule sur carats si price_usd_per_ct, sinon sur price_usd_per_piece * number
-        if order.price_usd_per_ct is not None:
-            order.total_usd = (usd_per_ct * order.carats).quantize(Decimal('0.01'))
-        elif order.price_usd_per_piece is not None:
-            order.total_usd = (order.price_usd_per_piece * order.number).quantize(Decimal('0.01'))
-        else:
-            order.total_usd = None
+        # 4) Compute total USD based on carats
+        total_usd = usd_per_ct * Decimal(order.carats)
+        order.total_usd = total_usd.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)

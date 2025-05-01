@@ -1,5 +1,5 @@
 from django.core.management.base import BaseCommand
-from core.services.order_pricing import MissingPriceFiller
+from core.services.tools.order_pricing import MissingPriceFiller
 
 class Command(BaseCommand):
     help = "Fill missing USD price fields on SupplierOrder."

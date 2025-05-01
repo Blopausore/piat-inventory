@@ -7,7 +7,7 @@ class SupplierOrderAdmin(admin.ModelAdmin):
         'date', 'supplier', 'order_no', 'stone', 'shape', 'color',
         'carats', 'price_cur_per_unit', 'currency', 'total_thb'
     )
-    search_fields = ('supplier', 'stone', 'color', 'shape', 'remarks')
-    list_filter = ('currency', 'supplier', 'shape', 'color')
+    search_fields = ('supplier', 'order_no', 'stone', 'color', 'shape', 'remarks')
+    list_filter = ('currency', 'supplier', 'shape', 'color', 'unit')
     ordering = ('-date',)
     date_hierarchy = 'date'

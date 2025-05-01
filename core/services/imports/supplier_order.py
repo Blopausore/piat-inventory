@@ -4,7 +4,7 @@ from django.db import IntegrityError
 
 from core.mappings import SUPPLIER_COLUMN_MAPPING
 from core.models import SupplierOrder
-from core.tools.parse import safe_parse_date, safe_decimal, safe_parse_int, parse_currency
+from core.tools.parse import safe_parse_date, safe_decimal, safe_parse_int, parse_currency, parse_unit
 from core.tools.row import get_value_mapped, is_fully_invalid_row, is_duplicate_object
 
 # fields that define uniqueness for SupplierOrder
@@ -27,6 +27,7 @@ MAPPING_CANCELED = {
     'cancel ',
     'cancel'
 }
+
 
 def get_value(row, field_name):
     return get_value_mapped(row, field_name, SUPPLIER_COLUMN_MAPPING)
@@ -103,7 +104,7 @@ def import_supplier_orders(file_path):
                     'carats': safe_decimal(get_value(row, 'carats')) or 0,
                     'currency': parse_currency(get_value(row, 'currency') or "THB"),
                     'price_cur_per_unit': safe_decimal(get_value(row, 'price_cur_per_unit')) or 0,
-                    'unit': get_value(row, 'unit') or "CT",
+                    'unit': parse_unit(get_value(row, 'unit') or "CT"),
                     'total_thb': safe_decimal(get_value(row, 'total_thb')) or 0,
                     'weight_per_piece': safe_decimal(get_value(row, 'weight_per_piece')) if get_value(row, 'weight_per_piece') else None,
                     'price_usd_per_ct': get_value(row, 'price_usd_per_ct'),

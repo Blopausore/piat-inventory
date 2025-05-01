@@ -3,7 +3,11 @@ from decimal import Decimal, InvalidOperation
 from django.utils import timezone
 import pandas as pd
 
-from core.mappings import CURRENCY_MAPPING
+from core.mappings import (
+    CURRENCY_MAPPING,
+    UNIT_MAPPING)
+
+
 from core.models.choices import Currency
 
 def safe_parse_int(value): 
@@ -38,9 +42,6 @@ def safe_parse_date(value, expected_year=None):
     # If the value is a string like "20-Jul", append the expected year
     if parsed is None and expected_year is not None:
         return safe_parse_date(f"{expected_year}-{value}", None)
-    
-    # if parsed.year < 2000:
-    #     parsed.year = expected_year
         
     return parsed
 
@@ -73,3 +74,23 @@ def parse_currency(raw: str) -> Currency:
         if txt in aliases:
             return Currency(canon)
     raise ValueError(f"Unknown currency: '{raw}'")
+
+
+
+def parse_unit(raw: str) -> str:
+    """
+    Clean `raw` and send back a canonical unit :
+      CT, G, KG, PC, TOTAL
+
+    Raises:
+      ValueError if `raw` is empty or not recognize.
+    """
+    if not raw:
+        raise ValueError("No unit provided")
+    txt = raw.strip() 
+
+    for canon, aliases in UNIT_MAPPING.items():
+        if txt in aliases:
+            return canon
+
+    raise ValueError(f"Unknown unit: '{raw}'")
