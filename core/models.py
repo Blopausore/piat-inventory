@@ -1,5 +1,5 @@
 from django.db import models
-
+from django.core.exceptions import ValidationError
 
 class Client(models.Model):
     name = models.CharField(max_length=255)
@@ -34,7 +34,19 @@ class SupplierOrder(models.Model):
         - THB rate at 'date'
     """
     class Meta:
-        unique_together = ('supplier', 'order_no', 'number', 'stone', 'shape', 'color', 'cutting', 'size', 'carats')
+        unique_together = (
+            'supplier','order_no','number',
+            'stone','shape','color',
+            'cutting','size','carats',
+        )
+        constraints = [
+            models.UniqueConstraint(
+                fields=['supplier','order_no','number','stone','shape','color','cutting','size','carats'],
+                name='unique_supplier_lot'
+            )
+        ]
+    # class Meta:
+    #     unique_together = ('supplier', 'order_no', 'number', 'stone', 'shape', 'color', 'cutting', 'size', 'carats')
 
     client_memo = models.CharField(max_length=10, default="P", verbose_name="Purchase (P), Memo (M), Bargain (B)") # Purchase (P), Memo (M), Bargain (B) 
     date = models.DateTimeField()
@@ -74,7 +86,29 @@ class SupplierOrder(models.Model):
     def __str__(self):
         return f"Supplier Order {self.order_no} - {self.supplier} - {self.date}"
 
+    def clean(self):
+        # Appelle d’abord les validations de champ standard
+        super().clean()
 
+        # Vérifie la contrainte “unique” métier
+        qs = SupplierOrder.objects.filter(
+            supplier=self.supplier,
+            order_no=self.order_no,
+            number=self.number,
+            stone=self.stone,
+            shape=self.shape,
+            color=self.color,
+            cutting=self.cutting,
+            size=self.size,
+            carats=self.carats
+        )
+        # Si l’objet existe déjà (et n’est pas lui-même), c’est un doublon
+        if self.pk:
+            qs = qs.exclude(pk=self.pk)
+        if qs.exists():
+            raise ValidationError({
+                '__all__': 'A supplier order with this combination of fields already exists.'
+            })
 
 # LATER 
 

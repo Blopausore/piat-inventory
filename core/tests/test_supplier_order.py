@@ -106,3 +106,64 @@ class SupplierOrderTests(TestCase):
         response = self.client.post(reverse("supplier_orders_import_upload"), {'file': upload})
         self.assertEqual(response.status_code, 302)
         self.assertEqual(SupplierOrder.objects.count(), 2)
+
+
+    def test_import_duplicate_rows_in_same_sheet(self):
+        """
+        When importing a sheet that contains two identical rows,
+        only one new SupplierOrder should be created.
+        """
+        initial_count = SupplierOrder.objects.count()
+
+        # Prepare two identical rows
+        row = {
+            "Date": "2024-03-13",
+            "Book No.": 86,
+            "No.": 4282,
+            "TAX INVOICE": "072/7777",
+            "CLIENT": "DupSupplier",
+            "PC": 2,
+            "Stone": "Emerald",
+            "H/NH": "NH",
+            "Color": "Green",
+            "Shape": "Oval",
+            "Cutting": "Good",
+            "Size": "7x5",
+            "Carats": 1.50,
+            "US/THB": "THB",
+            "price": 8000,
+            "PER": "CT",
+            "Total": 12000,
+            "Weight per piece": 0.75,
+            "price $/ct ": 200,
+            "price/$ per piece": 150,
+            "Total $": 300.00,
+            "Rate $ average 2019": 48.50,
+            "Remarks": "Test",
+            "CREDIT TERM": "1 month",
+            "Target size": "7x5"
+        }
+        df = pd.DataFrame([row, row])  # duplicate rows
+
+        # Write to Excel buffer
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False)
+        buffer.seek(0)
+
+        upload = SimpleUploadedFile(
+            "dup_test.xlsx",
+            buffer.read(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        # Perform import via the upload view
+        response = self.client.post(
+            reverse("supplier_orders_import_upload"),
+            {'file': upload}
+        )
+        self.assertEqual(response.status_code, 302)
+
+        # Only one new record should have been added
+        final_count = SupplierOrder.objects.count()
+        self.assertEqual(final_count, initial_count + 1)

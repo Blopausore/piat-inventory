@@ -4,6 +4,13 @@ from django.utils import timezone
 import pandas as pd
 
 
+def safe_parse_int(value): 
+    if isinstance(value, str):
+        value = ''.join(d for d in value if d.isdigit())
+        if value == '':
+            return None
+    return int(value)
+
 def safe_parse_date(value, expected_year=None):
     """Safely parse a date value and make it timezone-aware if needed."""
     if value is None or (isinstance(value, float) and pd.isna(value)):

@@ -14,7 +14,7 @@ class Command(BaseCommand):
         )
         
         parser.add_argument(
-            'verbose',
+            '--verbose',
             type=bool,
             default=False
         )

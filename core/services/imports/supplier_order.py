@@ -5,7 +5,7 @@ from django.db import IntegrityError
 
 from core.mappings.supplier_order import SUPPLIER_COLUMN_MAPPING
 from core.models import SupplierOrder
-from core.tools.parse import safe_parse_date, safe_decimal
+from core.tools.parse import safe_parse_date, safe_decimal, safe_parse_int
 from core.tools.row import get_value_mapped, is_fully_invalid_row, is_duplicate_object
 
 
@@ -38,13 +38,6 @@ def is_canceled(row):
 
 def check_field(df: pd.DataFrame):
     return "Date" in df.columns
-    # for field in COLUMN_REQUIRED:
-    #     for mapped_field in COLUMN_MAPPING.get(field, []):
-    #         if mapped_field in df.columns
-    #     if any(
-    #         (mapped_field in df.columns) for mapped_field in COLUMN_MAPPING.get(field)
-    #     ):
-    #         return False
     
 # Main Function
 
@@ -92,11 +85,11 @@ def import_supplier_orders(file_path):
                 achat = SupplierOrder(
                     client_memo=get_value(row, 'client_memo') or "P",
                     date=safe_parse_date(get_value(row, 'date'), sheet_name),
-                    book_no=int(get_value(row, 'book_no') or 0),
-                    order_no=int(get_value(row, 'order_no') or 0),
+                    book_no=safe_parse_int(get_value(row, 'book_no') or 0),
+                    order_no=safe_parse_int(get_value(row, 'order_no') or 0),
                     tax_invoice=get_value(row, 'tax_invoice'),
                     supplier=get_value(row, 'supplier'),
-                    number=int(get_value(row, 'number') or 0),
+                    number=safe_parse_int(get_value(row, 'number') or 0),
                     stone=get_value(row, 'stone'),
                     heating=get_value(row, 'heating'),
                     color=get_value(row, 'color'),

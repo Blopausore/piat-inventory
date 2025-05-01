@@ -10,3 +10,5 @@ def supplier_orders_list(request):
 
 def supplier_orders_import_page(request):
     return render(request, 'core/supplier_order/import.html')
+
+

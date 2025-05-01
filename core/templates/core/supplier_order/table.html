@@ -58,7 +58,7 @@
             { name: "price_usd_per_ct" }, { name: "price_usd_per_piece" },
             { name: "total_usd" }, { name: "rate_avg_2019" },
             { name: "remarks" }, { name: "credit_term" }, { name: "target_size" },
-            { name: "id", visible: false, searchable: false } 
+            { name: "id", visible: false, searchable: false }
         ]
     });
 
@@ -69,6 +69,7 @@
     $('#importBtn').on('click', () => {
         window.location.href = "{% url 'supplier_orders_import_page' %}";
     });
+
 </script>
 
 </body>
