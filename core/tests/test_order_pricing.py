@@ -33,7 +33,6 @@ class MissingPriceFillerTests(TestCase):
             'heating': None,
             'color': None,
             'shape': None,
-            'cutting': None,
             'size': None,
             'carats': Decimal('1.00'),
             'currency': 'IMC',

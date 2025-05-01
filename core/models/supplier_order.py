@@ -11,13 +11,13 @@ class SupplierOrder(models.Model):
     """
     class Meta:
         unique_together = (
-            'supplier','order_no','number',
-            'stone','shape','color',
-            'cutting','size','carats',
+            'date','supplier','order_no','number',
+            'stone','shape','color','size','carats',
+            'weight_per_piece', 'price_usd_per_ct'
         )
         constraints = [
             models.UniqueConstraint(
-                fields=['supplier','order_no','number','stone','shape','color','cutting','size','carats'],
+                fields=list(unique_together),
                 name='unique_supplier_lot'
             )
         ]
@@ -36,7 +36,6 @@ class SupplierOrder(models.Model):
     heating = models.CharField(max_length=20, blank=True, null=True)  # H/NH
     color = models.CharField(max_length=50, blank=True, null=True)
     shape = models.CharField(max_length=50, blank=True, null=True)
-    cutting = models.CharField(max_length=50, blank=True, null=True)
     size = models.CharField(max_length=50, blank=True, null=True)  # To be careful (Ex : 6x4, 2.3-2.4, 2.50)
     carats = models.DecimalField(max_digits=10, decimal_places=3, verbose_name="Weight in carats")
     
@@ -65,19 +64,14 @@ class SupplierOrder(models.Model):
         return f"Supplier Order {self.order_no} - {self.supplier} - {self.date}"
 
     def clean(self):
+        self.full_clean()
         super().clean()
 
-        qs = SupplierOrder.objects.filter(
-            supplier=self.supplier,
-            order_no=self.order_no,
-            number=self.number,
-            stone=self.stone,
-            shape=self.shape,
-            color=self.color,
-            cutting=self.cutting,
-            size=self.size,
-            carats=self.carats
-        )
+        filters = {
+            field: getattr(self, field) 
+            for field in self._meta.unique_together
+        }
+        qs = SupplierOrder.objects.filter(**filters)
         if self.pk:
             qs = qs.exclude(pk=self.pk)
         if qs.exists():

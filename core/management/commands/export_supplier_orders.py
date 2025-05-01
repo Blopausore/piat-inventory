@@ -17,7 +17,7 @@ class Command(BaseCommand):
         # Define columns and fields
         columns = [
             "Date", "Book No.", "Order No.", "Tax Invoice", "Supplier",
-            "PC", "Stone", "H/NH", "Color", "Shape", "Cutting", "Size",
+            "PC", "Stone", "H/NH", "Color", "Shape", "Size",
             "Carats", "Currency", "Price per Unit", "Unit",
             "Total THB", "Weight per Piece", "Price $/ct",
             "Price $ per Piece", "Total USD", "Rate Avg 2019",
@@ -25,7 +25,7 @@ class Command(BaseCommand):
         ]
         fields = [
             "date", "book_no", "order_no", "tax_invoice", "supplier",
-            "number", "stone", "heating", "color", "shape", "cutting", "size",
+            "number", "stone", "heating", "color", "shape", "size",
             "carats", "currency", "price_cur_per_unit", "unit",
             "total_thb", "weight_per_piece", "price_usd_per_ct",
             "price_usd_per_piece", "total_usd", "rate_avg_2019",

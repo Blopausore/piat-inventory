@@ -34,6 +34,8 @@ class Command(BaseCommand):
             self.stdout.write(f"[INFO] {len(report['failed_rows'])} rows failed to import.\n")
             self.stdout.write(f"[INFO] {report['skipped_canceled']} canceled orders skipped.\n")
             self.stdout.write(f"[INFO] {report['skipped_not_p']} non-purchase orders skipped.\n")
+            self.stdout.write(f"[INFO] {report['skipped_duplicates']} duplicate orders skipped.\n")
+            
             if kwargs['verbose']:
                 self.stdout.write(f"[INFO] Errors messages :\n")
 
