@@ -3,9 +3,11 @@ from abc import ABC, abstractmethod
 
 class BaseTransformFilter(ABC):
     """
-    Définit l'interface d'un filtre de transformation.
-    Chaque filtre prend un contexte et l'enrichit ou le modifie.
     """
+    def __let__(self, other):
+        return self.stage < other.stage
+    
+    stage = 0
     @abstractmethod
     def apply(self, ctx: "TransformContext"):
         pass

@@ -1,4 +1,4 @@
-# core/services/filters/type_parsing.py
+# core/services/transforms/filters/type_parsing.py
 
 from django.db import models
 from core.models.supplier_order import SupplierOrder

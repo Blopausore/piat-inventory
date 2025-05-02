@@ -5,7 +5,7 @@ from decimal import Decimal
 from django.db import transaction
 
 from core.models.supplier_order import SupplierOrder
-from core.models.supplier_order_raw import SupplierOrderRaw
+from core.models.order_raw import SupplierOrderRaw
 from core.tools.parse import (
     parse_date, parse_int, parse_decimal,
     parse_currency, parse_unit

@@ -26,6 +26,8 @@ class SupplierOrder(models.Model):
         'SupplierOrderRaw',
         on_delete=models.PROTECT,
         related_name='interpreted',
+        blank=True,
+        null=True
     )
 
     # Info
