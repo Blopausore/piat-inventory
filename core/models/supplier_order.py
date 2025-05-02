@@ -3,6 +3,27 @@ from django.core.exceptions import ValidationError
 
 from .choices import Currency
 
+UNIQUE_SUPPLIER_LOT = (
+    'date','supplier','order_no','number',
+    'stone','shape','color','size','carats',
+    'weight_per_piece','price_usd_per_ct',
+)
+
+
+class SupplierOrderRaw(models.Model):
+    """
+    Raw just has been imported from Excel
+    """
+    imported_at = models.DateTimeField(auto_now_add=True)
+    source_file = models.CharField(max_length=255)
+    row_data    = models.JSONField()   # tous les champs bruts dans un JSON
+    success     = models.BooleanField(default=False)
+    error       = models.TextField(blank=True, null=True)
+
+    def __str__(self):
+        return f"Raw #{self.id} from {self.source_file}"
+
+
 class SupplierOrder(models.Model):
     """An order made to a supplier.
     
@@ -10,17 +31,14 @@ class SupplierOrder(models.Model):
         - THB rate at 'date'
     """
     class Meta:
-        unique_together = (
-            'date','supplier','order_no','number',
-            'stone','shape','color','size','carats',
-            'weight_per_piece', 'price_usd_per_ct'
-        )
+        unique_together = UNIQUE_SUPPLIER_LOT
         constraints = [
             models.UniqueConstraint(
-                fields=list(unique_together),
+                fields=list(UNIQUE_SUPPLIER_LOT),
                 name='unique_supplier_lot'
             )
         ]
+
 
     client_memo = models.CharField(max_length=10, default="P", verbose_name="Purchase (P), Memo (M), Bargain (B)") # Purchase (P), Memo (M), Bargain (B) 
     date = models.DateTimeField()
