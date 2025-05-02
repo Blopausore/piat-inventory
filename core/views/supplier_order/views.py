@@ -2,7 +2,7 @@ from django.http import JsonResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 
-from core.models import SupplierOrder
+from core.models.supplier_order import SupplierOrder
 from core.services.tools.order_pricing import MissingPriceFiller
 
 def supplier_orders_list(request):

@@ -2,7 +2,7 @@ from django.contrib import messages
 from django.shortcuts import redirect
 
 from core.services.imports.supplier_order import import_supplier_orders
-from core.views.wrapper_order import orders_import_upload
+from core.views.wrapper_order.import_ import orders_import_upload
 
 def supplier_orders_import_upload(request):
     return orders_import_upload(

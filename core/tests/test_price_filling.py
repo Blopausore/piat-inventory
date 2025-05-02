@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.test import TestCase
 from core.tools.parse import parse_unit
 from core.services.tools.order_pricing import MissingPriceFiller
-from core.models import SupplierOrder
+from core.models.supplier_order import SupplierOrder
 from django.utils import timezone
 from exchange_rate.models import ExchangeRate
 

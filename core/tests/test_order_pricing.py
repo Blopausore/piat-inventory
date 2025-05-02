@@ -3,7 +3,7 @@ from datetime import date
 
 from django.test import TestCase
 from exchange_rate.models import ExchangeRate
-from core.models import SupplierOrder
+from core.models.supplier_order import SupplierOrder
 from core.services.tools.order_pricing import MissingPriceFiller
 from exchange_rate.services.conversion import CurrencyConversionError
 

@@ -1,5 +1,6 @@
 from django.contrib import admin
-from core.models import SupplierOrder, ClientOrder
+from core.models.supplier_order import SupplierOrder
+from core.models.client_order import ClientOrder
 
 @admin.register(SupplierOrder)
 class SupplierOrderAdmin(admin.ModelAdmin):

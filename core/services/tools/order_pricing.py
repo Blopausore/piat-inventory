@@ -4,7 +4,7 @@ import logging
 from decimal import Decimal, ROUND_HALF_UP
 from django.db.models import Q
 
-from core.models import SupplierOrder
+from core.models.supplier_order import SupplierOrder
 from core.tools.parse import parse_unit
 from exchange_rate.services.conversion import convert_to_usd, CurrencyConversionError
 

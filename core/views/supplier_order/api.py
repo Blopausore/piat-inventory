@@ -1,9 +1,10 @@
 
 from django.views.decorators.csrf import csrf_exempt
 
-from core.mappings import SUPPLIER_ORDER_FIELDS
-from core.models import SupplierOrder
-from core.views.wrapper_order.api import orders_json, order_update
+from core.mappings.supplier_order import SUPPLIER_ORDER_FIELDS
+from core.models.supplier_order import SupplierOrder
+from core.views.wrapper_order.api.json import orders_json
+from core.views.wrapper_order.api.update import order_update
 
     
 def supplier_orders_json(request):

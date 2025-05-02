@@ -6,7 +6,8 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 from django.db.models import Count, Q
 
-from core.models import SupplierOrder, ClientOrder
+from core.models.supplier_order import SupplierOrder
+from core.models.client_order import ClientOrder
 from exchange_rate.models import ExchangeRate
 
 class Command(BaseCommand):

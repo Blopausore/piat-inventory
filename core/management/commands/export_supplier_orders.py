@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand
 import openpyxl
 from openpyxl.utils import get_column_letter
-from core.models import SupplierOrder
+from core.models.supplier_order import SupplierOrder
 
 class Command(BaseCommand):
     help = "Export Supplier Orders into an Excel file."

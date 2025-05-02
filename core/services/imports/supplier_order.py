@@ -2,9 +2,9 @@ import sys
 import pandas as pd
 from django.db import IntegrityError
 
-from core.mappings import SUPPLIER_COLUMN_MAPPING
-from core.models import SupplierOrder
-from core.tools.parse import safe_parse_date, safe_decimal, safe_parse_int, parse_currency, parse_unit
+from core.mappings.supplier_order import SUPPLIER_COLUMN_MAPPING
+from core.models.supplier_order import SupplierOrder
+from core.tools.parse import parse_date, parse_decimal, parse_int, parse_currency, parse_unit
 from core.tools.row import get_value_mapped, is_fully_invalid_row, is_duplicate_object
 
 # fields that define uniqueness for SupplierOrder
@@ -83,7 +83,7 @@ def import_supplier_orders(file_path):
 
             try:
                 raw_date = get_value(row, 'date')
-                date_val = safe_parse_date(raw_date)
+                date_val = parse_date(raw_date)
                 if date_val is None:
                     raise ValueError(f"Invalid date: {raw_date}")
 
@@ -91,22 +91,22 @@ def import_supplier_orders(file_path):
                 kwargs = {
                     'client_memo': get_value(row, 'client_memo') or "P",
                     'date': date_val,
-                    'book_no': safe_parse_int(get_value(row, 'book_no') or 0),
-                    'order_no': safe_parse_int(get_value(row, 'order_no') or 0),
+                    'book_no': parse_int(get_value(row, 'book_no') or 0),
+                    'order_no': parse_int(get_value(row, 'order_no') or 0),
                     'tax_invoice': get_value(row, 'tax_invoice'),
                     'supplier': get_value(row, 'supplier'),
-                    'number': safe_parse_int(get_value(row, 'number') or 0),
+                    'number': parse_int(get_value(row, 'number') or 0),
                     'stone': get_value(row, 'stone'),
                     'heating': get_value(row, 'heating'),
                     'color': get_value(row, 'color'),
                     'shape': get_value(row, 'shape'),
                     'size': get_value(row, 'size'),
-                    'carats': safe_decimal(get_value(row, 'carats')) or 0,
+                    'carats': parse_decimal(get_value(row, 'carats')) or 0,
                     'currency': parse_currency(get_value(row, 'currency') or "THB"),
-                    'price_cur_per_unit': safe_decimal(get_value(row, 'price_cur_per_unit')) or 0,
+                    'price_cur_per_unit': parse_decimal(get_value(row, 'price_cur_per_unit')) or 0,
                     'unit': parse_unit(get_value(row, 'unit') or "CT"),
-                    'total_thb': safe_decimal(get_value(row, 'total_thb')) or 0,
-                    'weight_per_piece': safe_decimal(get_value(row, 'weight_per_piece')) if get_value(row, 'weight_per_piece') else None,
+                    'total_thb': parse_decimal(get_value(row, 'total_thb')) or 0,
+                    'weight_per_piece': parse_decimal(get_value(row, 'weight_per_piece')) if get_value(row, 'weight_per_piece') else None,
                     'price_usd_per_ct': get_value(row, 'price_usd_per_ct'),
                     'price_usd_per_piece': get_value(row, 'price_usd_per_piece'),
                     'total_usd': get_value(row, 'total_usd'),
