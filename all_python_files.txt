@@ -1,0 +1,3213 @@
+===== ./core/urls.py =====
+from django.urls import path
+from core.supplier_order.views.api import *
+from core.supplier_order.views.export import *
+from core.supplier_order.views.import_ import *
+from core.supplier_order.views.views import *
+ 
+urlpatterns = [
+    path('supplier-orders/', supplier_orders_list, name='supplier_orders_list'),
+    path('supplier-orders/data/', supplier_orders_json, name='supplier_orders_json'),
+    path('supplier-orders/update/', supplier_order_update, name='supplier_order_update'),
+    path('supplier-orders/export/', supplier_orders_export, name='supplier_orders_export'),
+    path('supplier-orders/import/', supplier_orders_import_page, name='supplier_orders_import_page'),
+    path('supplier-orders/import/upload/', supplier_orders_import_upload, name='supplier_orders_import_upload'),
+    path('supplier-orders/fill-prices/', fill_missing_prices, name='supplier_orders_fill_prices'),
+    
+    
+]
+
+
+===== ./core/common/mappings/units.py =====
+# core/mappings/units.py
+
+UNIT_MAPPING = {
+    # carat
+    'CT': {'CT', 'Ct', 'ct'},
+    # gramme
+    'G': {'G', 'Gram', 'g'},
+    # kilogramme
+    'KG': {'KG', 'kg', 'Kg'},
+    # pièce / unité
+    'PC': {'PC', 'Pc', 'p', 'P', 'pc'},
+    # tarif total / lot
+    'TOTAL': {'T', 'TOTAL', 'total', 'lot'},
+}
+
+
+===== ./core/common/mappings/currency.py =====
+CANONICAL = {'USD', 'THB', 'EUR', 'GBP', 'JPY'}
+
+
+CURRENCY_MAPPING = {
+    'USD': {'US', '$', 'US$'},
+    'THB': {'TH', '฿', 'THBAHT'},
+    'EUR': {'EU', '€', 'EURO'},
+    
+}
+
+
+
+
+===== ./core/common/mappings/__init__.py =====
+
+
+===== ./core/common/services/exports/to_excel.py =====
+import openpyxl
+from openpyxl.utils import get_column_letter
+from django.http import HttpResponse
+
+def export_orders_to_excel(queryset, filename="orders.xlsx", columns=None, fields=None):
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Orders"
+
+    # Write headers
+    for col_num, column_title in enumerate(columns, 1):
+        worksheet.cell(row=1, column=col_num, value=column_title)
+
+    # Write data
+    for row_num, obj in enumerate(queryset, 2):
+        row = []
+        for field in fields:
+            value = getattr(obj, field)
+            # Special format for dates and decimals
+            if hasattr(value, 'strftime'):
+                value = value.strftime('%Y-%m-%d')
+            elif value is None:
+                value = ''
+            row.append(value)
+
+        for col_num, cell_value in enumerate(row, 1):
+            worksheet.cell(row=row_num, column=col_num, value=cell_value)
+
+    # Adjust column widths (optional)
+    for i, _ in enumerate(columns, 1):
+        worksheet.column_dimensions[get_column_letter(i)].width = 15
+
+    # Prepare response
+    response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    workbook.save(response)
+
+    return response
+
+
+===== ./core/common/services/exports/__init__.py =====
+
+
+===== ./core/common/services/filters/mapping.py =====
+from .base import BaseTransformFilter
+
+from core.common.tools.row import get_value_mapped
+
+class FieldMappingFilter(BaseTransformFilter):
+    def __init__(self, field_mapping):
+        self.field_mapping = field_mapping
+
+    def apply(self, ctx):
+        for field in ctx.attrs.keys():
+            ctx.attrs[field] = get_value_mapped(ctx.raw.data, field, self.field_mapping) 
+                    
+        return True
+
+
+class ValueMappingFilter(BaseTransformFilter):
+    # TODO : mapping of 
+    def apply(self, ctx):
+        return super().apply(ctx)
+    
+
+===== ./core/common/services/filters/type_parsing.py =====
+# core/services/filters/type_parsing.py
+from decimal import Decimal, ROUND_HALF_UP
+import re
+
+from django.db import models
+from core.common.services.filters.base import BaseTransformFilter
+from core.common.tools.parse import (
+    parse_int, parse_decimal, parse_date,
+)
+
+def to_decimal(cleaned: str, field: models.DecimalField) -> Decimal:
+    """Nettoie, convertit et quantize selon field.decimal_places."""
+    # on enlève tout sauf chiffres, point et signe
+    s = re.sub(r"[^\d\.\-]", "", cleaned)
+    dec = Decimal(s or "0")
+    quantum = Decimal("1").scaleb(-field.decimal_places)
+    
+    return dec.quantize(quantum, rounding=ROUND_HALF_UP)
+
+class TypeParsingFilter(BaseTransformFilter):
+    """Sparse the value of the 'context'."""
+    def __init__(self, order_model):
+        self._opts = order_model._meta
+
+    def apply(self, ctx):
+        for field_name, raw_val in list(ctx.attrs.items()):
+            if raw_val is None:
+                continue
+
+            model_field = self._opts.get_field(field_name)
+
+            if isinstance(model_field, models.IntegerField):
+                ctx.attrs[field_name] = parse_int(raw_val)
+
+            # DecimalField
+            elif isinstance(model_field, models.DecimalField):
+                if isinstance(raw_val, str):
+                    ctx.attrs[field_name] = to_decimal(raw_val, model_field)
+                else:
+                    ctx.attrs[field_name] = parse_decimal(raw_val)
+
+            elif isinstance(model_field, (models.DateTimeField, models.DateField)):
+                ctx.attrs[field_name] = parse_date(raw_val)
+
+            # FloatField
+            elif isinstance(model_field, models.FloatField):
+                try:
+                    ctx.attrs[field_name] = float(raw_val)
+                except (TypeError, ValueError):
+                    ctx.attrs[field_name] = None
+            else:
+                ctx.attrs[field_name] = raw_val
+        return True
+
+===== ./core/common/services/filters/fill_price.py =====
+# core/services/transforms/filters/type_parsing.py
+
+from django.db import models
+from core.common.tools.parse import (
+    parse_int, parse_decimal, parse_date,
+)
+from .base import BaseTransformFilter
+
+class TypeParsingFilter(BaseTransformFilter):
+    """Sparse the value of the 'context'."""
+    def __init__(self, order_model):
+        self._opts = order_model._meta
+
+    def apply(self, ctx):
+        for field_name, raw_val in list(ctx.attrs.items()):
+            if raw_val is None:
+                continue
+
+            model_field = self._opts.get_field(field_name)
+
+            if isinstance(model_field, models.IntegerField):
+                ctx.attrs[field_name] = parse_int(raw_val)
+
+            # DecimalField
+            elif isinstance(model_field, models.DecimalField):
+                ctx.attrs[field_name] = parse_decimal(raw_val)
+
+            elif isinstance(model_field, (models.DateTimeField, models.DateField)):
+                ctx.attrs[field_name] = parse_date(raw_val)
+
+            # FloatField
+            elif isinstance(model_field, models.FloatField):
+                try:
+                    ctx.attrs[field_name] = float(raw_val)
+                except (TypeError, ValueError):
+                    ctx.attrs[field_name] = None
+            else:
+                ctx.attrs[field_name] = raw_val
+
+
+===== ./core/common/services/filters/context.py =====
+# core/services/filters/context.py
+from django.db.models import Field
+
+class TransformContext:
+    def __init__(self, raw, model_class):
+        self.raw = raw
+        self.order = None
+        self.error = None
+        self._model_class = model_class
+        fields = [
+            f.name
+            for f in model_class._meta.get_fields()
+            if isinstance(f, Field) and f.concrete and not f.auto_created
+        ]        
+        self._attrs = {f: None for f in fields}
+
+    @property
+    def attrs(self):
+        return self._attrs
+    
+    @property
+    def model_class(self):
+        return self._model_class
+    
+    def instantiate_order(self):
+        self._attrs['raw'] = self.raw
+        self.order = self.model_class(**self.attrs)
+
+
+===== ./core/common/services/filters/__init__.py =====
+
+
+===== ./core/common/services/filters/validity.py =====
+# core/services/filters/validity.py
+import pandas as pd
+from django.db.models import Field
+from core.common.services.filters.base import BaseTransformFilter
+from core.common.tools.row import is_duplicate_object, is_fully_invalid_row
+
+class SupplierValidityFilter(BaseTransformFilter):
+    
+    def apply(self, ctx):
+        missing = []
+        if all(pd.isna(value) for value in ctx.attrs.values()):
+            ctx.error = f"Row is empty"
+            return False
+        
+        # Check required field
+        for f in ctx.model_class._meta.get_fields():
+            if not isinstance(f, Field) or not f.concrete or f.auto_created:
+                continue
+            if f.name == 'raw':
+                continue
+            if not getattr(f, 'null', False) and not getattr(f, 'blank', False):
+                val = ctx.attrs.get(f.name)
+                if val in (None, ''):
+                    missing.append(f.name)
+        if missing:
+            ctx.error = f"Required field missing : {', '.join(missing)}"
+            return False
+        return True
+
+===== ./core/common/services/filters/base.py =====
+# core/services/transforms/filters/base.py
+from abc import ABC, abstractmethod
+from core.common.services.filters.context import TransformContext
+
+
+class BaseTransformFilter(ABC):
+    """
+    """
+    def __let__(self, other):
+        return self.stage < other.stage
+    
+    stage = 0
+    @abstractmethod
+    def apply(self, ctx: TransformContext) -> bool:
+        pass
+
+
+===== ./core/common/services/__init__.py =====
+
+
+===== ./core/common/models.py =====
+from django.db import models
+from django.core.exceptions import ValidationError
+
+class Client(models.Model):
+    name = models.CharField(max_length=255)
+
+class Supplier(models.Model):
+    name = models.CharField(max_length=255)
+    
+class Currency(models.TextChoices):
+    USD = 'USD', 'USD' 
+    THB = 'THB', 'BHT'
+    # EUR = 'EUR', 'Euro'
+    # GBP = 'GBP', 'British Pound'
+    # JPY = 'JPY', 'Japanese Yen'
+
+
+===== ./core/common/views/api/json.py =====
+# core/views/wrapper_order/api.py
+
+from django.core.paginator import Paginator
+from django.db.models import Q
+from django.http import JsonResponse
+from django.utils.dateparse import parse_datetime
+from datetime import datetime
+
+def orders_json(
+    request,
+    model,
+    display_fields,
+    search_fields=None,
+    related_search_fields=None,
+    filter_conditions=None,
+    date_range_filters=None,
+    multi_value_filters=None,
+    default_order_field="date"
+):
+    """
+    Generic, production-ready JSON response for DataTables.
+    Supports:
+    - Pagination
+    - Sorting by column
+    - Search across fields (including ForeignKey)
+    - Custom filtering (exact)
+    - Multi-value filtering (e.g., shape=oval&shape=round)
+    - Date range filtering (e.g., ?start_date=2023-01-01&end_date=2023-03-01)
+    """
+
+    draw = int(request.GET.get("draw", 1))
+    start = int(request.GET.get("start", 0))
+    length = int(request.GET.get("length", 10))
+
+    order_column_index = request.GET.get("order[0][column]")
+    order_direction = request.GET.get("order[0][dir]")
+    field_map = {index: field for index, (field, _) in enumerate(display_fields)}
+
+    order_column = field_map.get(int(order_column_index), default_order_field) if order_column_index else default_order_field
+    if order_direction == "desc":
+        order_column = f"-{order_column}"
+
+    queryset = model.objects.all()
+
+    # Global search
+    search_value = request.GET.get("search[value]", "")
+    if search_value:
+        q_objects = Q()
+
+        if search_fields:
+            for field in search_fields:
+                q_objects |= Q(**{f"{field}__icontains": search_value})
+
+        if related_search_fields:
+            for related_field in related_search_fields:
+                q_objects |= Q(**{f"{related_field}__icontains": search_value})
+
+        queryset = queryset.filter(q_objects)
+
+    # Exact match filters
+    if filter_conditions:
+        for key, value in filter_conditions.items():
+            if value:
+                queryset = queryset.filter(**{key: value})
+
+    # Multi-value filters (?shape=oval&shape=round)
+    if multi_value_filters:
+        for field in multi_value_filters:
+            values = request.GET.getlist(field)
+            if values:
+                queryset = queryset.filter(**{f"{field}__in": values})
+
+    # Date range filters
+    if date_range_filters:
+        for field in date_range_filters:
+            start_date_str = request.GET.get("start_date")
+            end_date_str = request.GET.get("end_date")
+            try:
+                if start_date_str:
+                    start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+                    queryset = queryset.filter(**{f"{field}__gte": start_date})
+                if end_date_str:
+                    end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
+                    queryset = queryset.filter(**{f"{field}__lte": end_date})
+            except ValueError:
+                pass  # silently ignore bad date
+
+    queryset = queryset.order_by(order_column)
+    paginator = Paginator(queryset, length)
+    page_number = start // length + 1
+    page = paginator.page(page_number)
+
+    data = []
+    for obj in page.object_list:
+        row = []
+        for field, _ in display_fields:
+            value = getattr(obj, field, '')
+            if hasattr(value, "strftime"):
+                value = value.strftime("%Y-%m-%d")
+            row.append(str(value) if value is not None else '')
+        row.append(obj.id)
+        data.append(row)
+        
+    return JsonResponse({
+        "draw": draw,
+        "recordsTotal": model.objects.count(),
+        "recordsFiltered": queryset.count(),
+        "data": data,
+    })
+
+
+===== ./core/common/views/api/update.py =====
+
+from django.http import JsonResponse 
+from django.views.decorators.csrf import csrf_exempt
+
+@csrf_exempt
+def order_update(request, order_model, order_fields):
+    if request.method == "POST":
+        order_id = request.POST.get('order_id')
+        if not order_id:
+            return JsonResponse({"error": "Missing order ID"}, status=400)
+
+        field_index = int(request.POST.get('field_index'))
+        new_value = request.POST.get('new_value')
+
+        # Mapping of column indexes to model fields
+        field_map = {index: field for index, (field, title) in enumerate(order_fields)}
+
+        field_name = field_map.get(field_index)
+        if not field_name:
+            return JsonResponse({"error": "Invalid field index"}, status=400)
+
+        try:
+            order = order_model.objects.get(id=order_id)
+            setattr(order, field_name, new_value)
+            order.save()
+            return JsonResponse({"success": True})
+        except order_model.DoesNotExist:
+            return JsonResponse({"error": "Order not found"}, status=404)
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=500)
+
+    return JsonResponse({"error": "Invalid request method"}, status=405)
+
+
+
+
+===== ./core/common/views/api/__init__.py =====
+from .json import orders_json
+from .update import order_update
+
+
+===== ./core/common/views/export.py =====
+from datetime import datetime
+import pandas as pd
+
+from django.http import HttpResponse 
+from django.utils.timezone import is_aware
+
+
+def orders_export(request, order_model, order_fields, order_name):
+    orders = order_model.objects.all()
+
+    data = []
+    for order in orders:
+        row = {}
+        for field, column_title in order_fields:
+            value = getattr(order, field, None)
+
+            if field == "date" and value and is_aware(value):
+                value = value.astimezone(None).replace(tzinfo=None)
+            if isinstance(value, datetime):
+                value = value.date()
+            row[column_title] = value
+
+        data.append(row)    
+
+    df = pd.DataFrame(data)
+    for col in df.select_dtypes(include=['datetimetz']).columns:
+        df[col] = df[col].dt.tz_localize(None)
+    now = datetime.now().strftime("%Y%m%d_%H%M%S")  # e.g., 20250429_153045
+    filename = f"{order_name}_orders_export_{now}.xlsx"
+
+    response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+    with pd.ExcelWriter(response, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False)
+
+    return response
+
+
+===== ./core/common/views/import_.py =====
+from django.contrib import messages
+from django.shortcuts import redirect
+
+
+
+def orders_import_upload(request, import_order_func, order_name):
+    if request.method == 'POST' and request.FILES['file']:
+        file = request.FILES['file']
+        try:
+            report = import_order_func(file)
+            messages.success(request, f"Import completed: {report['imported']} orders added.")
+            return redirect(f'{order_name}_orders_list')  
+        except Exception as e:
+            messages.error(request, f"Import failed: {str(e)}")
+            return redirect(f'{order_name}_orders_import_page')
+    else:
+        messages.error(request, "No file selected.")
+        return redirect(f'{order_name}_orders_import_page')
+    
+
+
+===== ./core/common/views/__init__.py =====
+from .api import orders_json, order_update
+from .export import orders_export
+from .import_ import orders_import_upload
+
+
+===== ./core/common/tools/__init__.py =====
+
+
+===== ./core/common/tools/parse.py =====
+import math
+from decimal import Decimal, InvalidOperation
+from django.utils import timezone
+import pandas as pd
+
+from core.common.models import Currency
+from core.common.mappings.unit import UNIT_MAPPING
+from core.common.mappings.choices import CURRENCY_MAPPING
+
+def parse_int(value): 
+    
+    if isinstance(value, str):
+        value = ''.join(d for d in value if d.isdigit())
+        if value == '':
+            return None
+    return int(value)
+
+def parse_date(value, expected_year=None):
+    """Safely parse a date value and make it timezone-aware if needed."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+
+    # Special handling if the value is a float (Excel day number)
+    if isinstance(value, (float, int)):
+        parsed = pd.to_datetime(value, origin='1899-12-30', unit='D', errors='coerce')
+    else:
+        parsed = pd.to_datetime(value, errors='coerce')
+
+    if pd.isna(parsed):
+        return None
+
+    # Convert pandas Timestamp to native Python datetime
+    if isinstance(parsed, pd.Timestamp):
+        parsed = parsed.to_pydatetime()
+
+    # Ensure timezone-awareness
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    
+    # If the value is a string like "20-Jul", append the expected year
+    if parsed is None and expected_year is not None:
+        return parse_date(f"{expected_year}-{value}", None)
+        
+    return parsed
+
+def parse_decimal(value, default=Decimal('0.0')):
+    """Convert to Decimal safely. Return default if value is invalid."""
+    if value is None:
+        return default
+    if isinstance(value, float) and math.isnan(value):
+        return default
+    try:
+        if isinstance(value, str):
+            value = ''.join(c for c in value if (c.isdigit() or c in '.-'))  # keep only digits, dot, minus
+        elif isinstance(value, float):
+            value = round(value, ndigits=5)
+        return Decimal(value)
+    except (InvalidOperation, ValueError):
+        return default
+
+
+def parse_currency(raw: str) -> Currency:
+    """
+    Normalize a notation for a currency
+    """
+    if not raw:
+        raise ValueError("No currency provided")
+    txt = raw.strip().upper()
+
+    if txt in CURRENCY_MAPPING.keys():
+        return Currency(txt)
+
+    for canon, aliases in CURRENCY_MAPPING.items():
+        if txt in aliases:
+            return Currency(canon)
+    raise ValueError(f"Unknown currency: '{raw}'")
+
+
+
+def parse_unit(raw: str) -> str:
+    """
+    Clean `raw` and send back a canonical unit :
+      CT, G, KG, PC, TOTAL
+
+    Raises:
+      ValueError if `raw` is empty or not recognize.
+    """
+    if not raw:
+        raise ValueError("No unit provided")
+    txt = raw.strip() 
+
+    for canon, aliases in UNIT_MAPPING.items():
+        if txt in aliases:
+            return canon
+
+    raise ValueError(f"Unknown unit: '{raw}'")
+
+
+===== ./core/common/tools/row.py =====
+import pandas as pd
+
+def get_value_mapped(row, field_name, mapping):
+    possible_columns = mapping.get(field_name, [])
+    for col in possible_columns:
+        if col in row:
+            
+            if type(row[col]) in {int, float} and pd.isna(row[col]):
+                return None
+            return row[col]
+    return None
+
+
+def is_fully_invalid_row(row):
+    return all(pd.isna(value) for value in row.values)
+
+def is_duplicate_object(obj, fields=None):
+    """
+    Check if an object already exists in database based on selected fields.
+    
+    Args:
+        obj: Django model instance (not yet saved)
+        fields: list of field names to check uniqueness (default : Meta.unique_together)
+        
+    Returns:
+        bool
+    """
+    if fields is None:
+        # Try to detect fields from Meta.unique_together
+        meta = getattr(obj._meta, 'unique_together', None)
+        if meta:
+            # Django allows multiple unique_together groups, take the first
+            fields = meta[0]
+        else:
+            raise ValueError("No fields provided and no unique_together defined in Meta.")
+
+    filter_kwargs = {field: getattr(obj, field) for field in fields}
+    return obj.__class__.objects.filter(**filter_kwargs).exists()
+
+===== ./core/common/management/commands/__init__.py =====
+
+
+===== ./core/common/management/__init__.py =====
+
+
+===== ./core/common/__init__.py =====
+
+
+===== ./core/common/tests.py =====
+
+
+===== ./core/tests/test_order_raw_import.py =====
+import os
+import tempfile
+from decimal import Decimal
+from datetime import datetime
+import pandas as pd
+import numpy as np
+
+from django.test import TestCase
+from core.services.imports.order_raw import OrderRawImportService
+from core.models.order_raw import OrderRaw, SupplierOrderRaw, ClientOrderRaw
+
+class OrderRawImportServiceTest(TestCase):
+    def setUp(self):
+        self.tmpfile = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        df1 = pd.DataFrame([
+            {"A": np.nan, "B": None},
+            {"A": 1,     "B": "foo"},
+        ])
+        df2 = pd.DataFrame([
+            {"X": 0, "Y": 0.0, "Z": ""},   
+            {"X": 5, "Y": 3.14, "Z": "bar"},
+        ])
+        with pd.ExcelWriter(self.tmpfile.name, engine="openpyxl") as writer:
+            df1.to_excel(writer, sheet_name="Feuille1", index=False)
+            df2.to_excel(writer, sheet_name="Feuille2", index=False)
+        self.tmpfile.close()
+
+    def tearDown(self):
+        os.unlink(self.tmpfile.name)
+
+    def test_serialize_value(self):
+        svc = OrderRawImportService(self.tmpfile.name, order_type="supplier")
+        self.assertIsNone(svc._serialize_value(np.nan))
+        ts = pd.Timestamp("2025-05-02T13:45:00")
+        iso = svc._serialize_value(ts)
+        self.assertIsInstance(iso, str)
+        self.assertTrue(iso.startswith("2025-05-02T13:45"))
+        self.assertEqual(svc._serialize_value(np.int64(7)), 7)
+        self.assertEqual(svc._serialize_value("abc"), "abc")
+        self.assertEqual(svc._serialize_value(3.21), 3.21)
+
+    def test_has_meaningful_data(self):
+        svc = OrderRawImportService(self.tmpfile.name, order_type="client")
+        self.assertFalse(svc._has_meaningful_data({
+            "a": None, "b": "", "c": 0, "d": 0.0
+        }))
+        self.assertTrue(svc._has_meaningful_data({
+            "a": None, "b": "", "c": 1, "d": 0.0
+        }))
+
+    def test_run_creates_and_skips(self):
+        svc = OrderRawImportService(self.tmpfile.name, order_type="supplier")
+        report = svc.run()
+        self.assertEqual(report["imported"], 2)
+        self.assertEqual(report["skipped"], 2)
+        self.assertEqual(SupplierOrderRaw.objects.count(), 2)
+        raws = list(SupplierOrderRaw.objects.order_by("row_index"))
+        self.assertEqual(raws[0].sheet_name, "Feuille1")
+        self.assertEqual(raws[1].sheet_name, "Feuille2")
+
+        # svc_cli = OrderRawImportService(self.tmpfile.name, order_type="client")
+        # report_cli = svc_cli.run()
+        # self.assertEqual(report_cli["imported"], 2)
+        # self.assertEqual(ClientOrderRaw.objects.count(), 2)
+
+    def test_default_order_model(self):
+        svc = OrderRawImportService(self.tmpfile.name, order_type="other")
+        report = svc.run()
+        self.assertEqual(report["imported"], 2)
+        self.assertEqual(OrderRaw.objects.count(), 2)
+
+
+===== ./core/tests/test_supplier_order.py =====
+import io
+import warnings
+
+from datetime import datetime
+import pandas as pd
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, Client
+from django.urls import reverse
+
+from core.models import SupplierOrder
+
+class SupplierOrderTests(TestCase):
+    def setUp(self):
+        warnings.filterwarnings("ignore", category=RuntimeWarning, message="DateTimeField .* received a naive datetime")
+  
+        self.client = Client()
+        self.order = SupplierOrder.objects.create(
+            client_memo="P",
+            date=datetime(2024, 1, 10),
+            book_no=86,
+            order_no=4280,
+            tax_invoice="072/3566",
+            supplier="Kstone",
+            number=5,
+            stone="Ruby",
+            heating="H",
+            color="Red",
+            shape="Oct",
+            size="6x4",
+            carats=2.97,
+            currency="THB",
+            price_cur_per_unit=7000,
+            unit="CT",
+            total_thb=20790,
+            weight_per_piece=0.59,
+            price_usd_per_ct=200,
+            price_usd_per_piece=118.8,
+            total_usd=611.47,
+            rate_avg_2019=48.29,
+            remarks="Tiffany",
+            credit_term="2 months",
+            target_size="6x4"
+        )
+
+    def test_json_view_returns_data(self):
+        response = self.client.get(reverse("supplier_orders_json"))
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertGreater(json_data["recordsTotal"], 0)
+        self.assertGreater(len(json_data["data"]), 0)
+
+    def test_export_excel_content(self):
+        response = self.client.get(reverse("supplier_orders_export"))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", response["Content-Type"])
+        df = pd.read_excel(io.BytesIO(response.content))
+        self.assertFalse(df.empty)
+        self.assertIn("Stone", df.columns)
+
+    def test_update_field_successfully(self):
+        response = self.client.post(reverse("supplier_order_update"), {
+            "order_id": self.order.id,
+            "field_index": 6,  # index of "stone" if ordering is kept
+            "new_value": "Sapphire",
+            "csrfmiddlewaretoken": "dummy"
+        })
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.stone, "Sapphire")
+
+    def test_import_from_excel(self):
+        df = pd.DataFrame([{
+            "Date": "2024-03-13",
+            "Book No.": 86,
+            "No.": 4281,
+            "TAX INVOICE": "072/9999",
+            "CLIENT": "TestSupplier",
+            "PC": 3,
+            "Stone": "Sapphire",
+            "H/NH": "NH",
+            "Color": "Blue",
+            "Shape": "Oct",
+            "Size": "5x4",
+            "Carats": 1.20,
+            "US/THB": "THB",
+            "price": 7000,
+            "PER": "CT",
+            "Total": 8400,
+            "Weight per piece": 0.40,
+            "price $/ct ": 200,
+            "price/$ per piece": 80,
+            "Total $": 247.06,
+            "Rate $ average 2019": 48.29,
+            "Remarks": "Tiffany",
+            "CREDIT TERM": "2 months",
+            "Target size": "5x4"
+        }])
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False)
+        buffer.seek(0)
+        upload = SimpleUploadedFile("test_import.xlsx", buffer.read(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        response = self.client.post(reverse("supplier_orders_import_upload"), {'file': upload})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(SupplierOrder.objects.count(), 2)
+
+
+    def test_import_duplicate_rows_in_same_sheet(self):
+        """
+        When importing a sheet that contains two identical rows,
+        only one new SupplierOrder should be created.
+        """
+        initial_count = SupplierOrder.objects.count()
+
+        # Prepare two identical rows
+        row = {
+            "Date": "2024-03-13",
+            "Book No.": 86,
+            "No.": 4282,
+            "TAX INVOICE": "072/7777",
+            "CLIENT": "DupSupplier",
+            "PC": 2,
+            "Stone": "Emerald",
+            "H/NH": "NH",
+            "Color": "Green",
+            "Shape": "Oval",
+            "Size": "7x5",
+            "Carats": 1.50,
+            "US/THB": "THB",
+            "price": 8000,
+            "PER": "CT",
+            "Total": 12000,
+            "Weight per piece": 0.75,
+            "price $/ct ": 200,
+            "price/$ per piece": 150,
+            "Total $": 300.00,
+            "Rate $ average 2019": 48.50,
+            "Remarks": "Test",
+            "CREDIT TERM": "1 month",
+            "Target size": "7x5"
+        }
+        df = pd.DataFrame([row, row])  # duplicate rows
+
+        # Write to Excel buffer
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False)
+        buffer.seek(0)
+
+        upload = SimpleUploadedFile(
+            "dup_test.xlsx",
+            buffer.read(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        # Perform import via the upload view
+        response = self.client.post(
+            reverse("supplier_orders_import_upload"),
+            {'file': upload}
+        )
+        self.assertEqual(response.status_code, 302)
+
+        # Only one new record should have been added
+        final_count = SupplierOrder.objects.count()
+        self.assertEqual(final_count, initial_count + 1)
+
+===== ./core/tests/test_filters.py =====
+# core/services/filters/tests/test_filters.py
+
+from decimal import Decimal
+from datetime import datetime
+
+from django.db import models
+from django.test import SimpleTestCase
+from django.test.utils import isolate_apps
+
+from core.services.filters.context import TransformContext
+from core.services.filters.mapping import FieldMappingFilter
+from core.services.filters.type_parsing import TypeParsingFilter
+from core.services.filters.validity import SupplierValidityFilter
+from core.models.order_raw import OrderRaw
+
+@isolate_apps("core")
+class FieldMappingFilterTest(SimpleTestCase):
+    
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        class OrderTest(models.Model):
+            class Meta:
+                app_label = 'core'  # pas de migration réelle
+            book_no               = models.CharField(max_length=50)
+            date                  = models.DateTimeField()
+            order_no              = models.CharField(max_length=50)
+            supplier              = models.CharField(max_length=50)
+            number                = models.IntegerField()
+            stone                 = models.CharField(max_length=50)
+            price_usd_per_piece   = models.DecimalField(max_digits=10, decimal_places=2)
+            total_usd             = models.DecimalField(max_digits=10, decimal_places=2)
+        cls.TestModel = OrderTest
+        
+    def setUp(self):
+        self.order_mapping = {
+                'date':                 ['Date'],
+                'book_no':              ['Book No.', 'Book No'],
+                'order_no':             ['No.', 'Order No', 'No'],
+                'supplier':             ['CLIENT', 'Client', 'Supplier'],
+                'number':               ['PC', 'Pieces', 'Qty'],
+                'stone':                ['Stone', '  Stone'],
+                'price_usd_per_piece':  ['price/$ per piece', 'Price/$ per Piece'],
+                'total_usd':            ['Total $', 'USD Total'],
+                
+        }
+        
+    def test_mapping_filter_picks_correct_columns(self):
+        raw = {
+            'Book No.': '123',
+            'Date': '2025-05-02T15:30:00',
+            'Supplier': 'GemCo'
+        }
+    
+        ctx = TransformContext(raw, self.TestModel)
+        filt = FieldMappingFilter(field_mapping=self.order_mapping)
+        filt.apply(ctx)
+        self.assertEqual(ctx.attrs['book_no'], '123')
+        self.assertEqual(ctx.attrs['date'], '2025-05-02T15:30:00')
+        self.assertEqual(ctx.attrs['supplier'], 'GemCo')
+
+    def test_mapping_filter_with_alternatives(self):
+        raw = { 'No.': '456', 'Order No': '789' }
+        ctx = TransformContext(raw, self.TestModel)
+        filt = FieldMappingFilter(field_mapping=self.order_mapping)
+        filt.apply(ctx)
+        self.assertEqual(ctx.attrs['order_no'], '456')
+
+
+@isolate_apps("core")
+class TypeParsingFilterTest(SimpleTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        class OrderTest(models.Model):
+            class Meta:
+                app_label = 'core' 
+            book_no               = models.CharField(max_length=50)
+            date                  = models.DateTimeField()
+            order_no              = models.CharField(max_length=50)
+            supplier              = models.CharField(max_length=50)
+            number                = models.IntegerField()
+            stone                 = models.CharField(max_length=50)
+            price_usd_per_piece   = models.DecimalField(max_digits=10, decimal_places=2)
+            total_usd             = models.DecimalField(max_digits=10, decimal_places=2)
+        cls.TestModel = OrderTest
+
+    def setUp(self):
+        self.ctx = TransformContext({}, self.TestModel)
+        self.parser = TypeParsingFilter()
+
+    def test_parse_int_and_decimal_and_date(self):
+        self.ctx.attrs['book_no'] = '42'
+        self.ctx.attrs['carats'] = '1.234'
+        self.ctx.attrs['date'] = '2025-01-01'
+        self.parser.apply(self.ctx)
+        # int
+        self.assertIsInstance(self.ctx.attrs['book_no'], int)
+        self.assertEqual(self.ctx.attrs['book_no'], 42)
+        # Decimal
+        self.assertIsInstance(self.ctx.attrs['carats'], Decimal)
+        self.assertEqual(str(self.ctx.attrs['carats']), '1.234')
+        # DateTimeField → datetime
+        self.assertIsInstance(self.ctx.attrs['date'], datetime)
+        self.assertEqual(self.ctx.attrs['date'].date(), datetime(2025, 1, 1).date())
+
+@isolate_apps('core')
+class SupplierValidityFilterTest(SimpleTestCase):
+    
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        class OrderTest(models.Model):
+            class Meta:
+                app_label = 'core'  # pas de migration réelle
+                unique_together = ('date','supplier','order_no')
+                constraints = [
+                models.UniqueConstraint(
+                    fields=list(('date','supplier','order_no')),
+                    name='unique_supplier_lot'
+                )
+        ]
+            book_no               = models.CharField(max_length=50, blank=True, null=True)
+            date                  = models.DateTimeField()
+            order_no              = models.CharField(max_length=50)
+            supplier              = models.CharField(max_length=50)
+            number                = models.IntegerField(blank=True, null=True)
+            stone                 = models.CharField(max_length=50, blank=True, null=True)
+            price_usd_per_piece   = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+            total_usd             = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+        cls.TestModel = OrderTest
+    
+    def setUp(self):
+        self.ctx = TransformContext({}, self.TestModel)
+        self.filt = SupplierValidityFilter()
+
+    def test_missing_required_fields(self):
+        ok = self.filt.apply(self.ctx)
+        self.assertFalse(ok)
+        self.assertIn('date', self.ctx.error)
+        self.assertIn('supplier', self.ctx.error)   
+
+    def test_all_required_present(self):
+        for f in ['date','supplier','order_no']:
+            self.ctx.attrs[f] = 'dummy'
+        ok = self.filt.apply(self.ctx)
+        self.assertTrue(ok)
+        self.assertIsNone(self.ctx.error)
+
+
+
+===== ./core/tests/test_order_pricing.py =====
+from decimal import Decimal
+from datetime import date
+
+from django.test import TestCase
+from exchange_rate.models import ExchangeRate
+from core.models.supplier_order import SupplierOrder
+from core.services.tools.order_pricing import MissingPriceFiller
+from exchange_rate.services.conversion import CurrencyConversionError
+
+class MissingPriceFillerTests(TestCase):
+    def setUp(self):
+        # Define a fictional currency IMC: 1 USD = 2 IMC
+        ExchangeRate.objects.create(
+            base_currency='IMC',
+            date=date(2025, 5, 1),
+            price=Decimal('2.0000'),
+            open=Decimal('1.9000'),
+            high=Decimal('2.1000'),
+            low=Decimal('1.8000'),
+            change_percent='0.00%'
+        )
+
+    def make_order(self, **kwargs):
+        defaults = {
+            'client_memo': 'P',
+            'date': date(2025, 5, 1),
+            'book_no': 1,
+            'order_no': 100,
+            'tax_invoice': 'T1',
+            'supplier': 'ImaginarySup',
+            'number': 1,
+            'stone': 'FictionStone',
+            'heating': None,
+            'color': None,
+            'shape': None,
+            'size': None,
+            'carats': Decimal('1.00'),
+            'currency': 'IMC',
+            'price_cur_per_unit': Decimal('10.00'),
+            'unit': 'CT',
+            'total_thb': Decimal('10.00'),
+            'weight_per_piece': Decimal('0.50'),
+            'price_usd_per_ct': None,
+            'price_usd_per_piece': None,
+            'total_usd': None,
+            'rate_avg_2019': None,
+            'remarks': '',
+            'credit_term': '',
+            'target_size': '',
+        }
+        defaults.update(kwargs)
+        return SupplierOrder.objects.create(**defaults)
+
+    def test_fill_single_order_imc(self):
+        order = self.make_order(
+            price_cur_per_unit=Decimal('10.00'),
+            carats=Decimal('2.00'),
+            weight_per_piece=Decimal('0.25'),
+            currency='IMC',
+        )
+        service = MissingPriceFiller(dry_run=False, verbose=False)
+        report = service.run()
+
+        # Should process one order and update it
+        self.assertEqual(report['to_update'], 1)
+        self.assertEqual(report['updated'], 1)
+        self.assertEqual(report['errors'], [])
+
+        order.refresh_from_db()
+        # price_usd_per_ct = 10 IMC → 5 USD
+        self.assertEqual(order.price_usd_per_ct, Decimal('5.00'))
+        # price_usd_per_piece = 5.00 * 0.25 = 1.25
+        self.assertEqual(order.price_usd_per_piece, Decimal('1.25'))
+        # total_usd = 5.00 * 2.00 = 10.00
+        self.assertEqual(order.total_usd, Decimal('10.00'))
+
+    def test_fill_single_order_usd(self):
+        # Even with fictional currency, USD orders pass-through
+        order = self.make_order(
+            price_cur_per_unit=Decimal('7.00'),
+            carats=Decimal('3.00'),
+            weight_per_piece=Decimal('1.00'),
+            currency='USD',
+        )
+        service = MissingPriceFiller(dry_run=False, verbose=False)
+        report = service.run()
+
+        self.assertEqual(report['to_update'], 1)
+        self.assertEqual(report['updated'], 1)
+        self.assertEqual(report['errors'], [])
+
+        order.refresh_from_db()
+        self.assertEqual(order.price_usd_per_ct, Decimal('7.00'))
+        self.assertEqual(order.price_usd_per_piece, Decimal('7.00'))
+        self.assertEqual(order.total_usd, Decimal('21.00'))
+
+    def test_dry_run_does_not_persist(self):
+        order = self.make_order(price_cur_per_unit=Decimal('8.00'))
+        service = MissingPriceFiller(dry_run=True, verbose=False)
+        report = service.run()
+
+        self.assertEqual(report['to_update'], 1)
+        self.assertEqual(report['updated'], 1)
+
+        order.refresh_from_db()
+        self.assertIsNone(order.price_usd_per_ct)
+        self.assertIsNone(order.total_usd)
+
+    def test_missing_rate_reports_error(self):
+        order = self.make_order(currency='FOO', price_cur_per_unit=Decimal('5.00'))
+        service = MissingPriceFiller(dry_run=False, verbose=True)
+        report = service.run()
+
+        self.assertEqual(report['to_update'], 1)
+        self.assertEqual(report['updated'], 0)
+        self.assertEqual(len(report['errors']), 1)
+        err = report['errors'][0]
+        self.assertEqual(err['order_id'], order.id)
+        self.assertIn('No exchange rate available', err['error'])
+
+
+===== ./core/tests/test_price_filling.py =====
+import unittest
+from decimal import Decimal
+from django.test import TestCase
+from core.common.tools.parse import parse_unit
+from core.services.tools.order_pricing import MissingPriceFiller
+from core.models.supplier_order import SupplierOrder
+from django.utils import timezone
+from exchange_rate.models import ExchangeRate
+
+class ParseUnitTests(TestCase):
+    def test_parse_unit_carat_variants(self):
+        for raw in ['CT', 'Ct', 'ct']:
+            self.assertEqual(parse_unit(raw), 'CT')
+
+    def test_parse_unit_piece_variants(self):
+        for raw in ['PC', 'Pc', 'p', 'P', 'pc']:
+            self.assertEqual(parse_unit(raw), 'PC')
+
+    def test_parse_unit_gram_variants(self):
+        for raw in ['G', 'Gram', 'g']:
+            self.assertEqual(parse_unit(raw), 'G')
+
+    def test_parse_unit_kg_variants(self):
+        for raw in ['KG', 'kg', 'Kg']:
+            self.assertEqual(parse_unit(raw), 'KG')
+
+    def test_parse_unit_total_variants(self):
+        for raw in ['T', 'TOTAL', 'total', 'lot']:
+            self.assertEqual(parse_unit(raw), 'TOTAL')
+
+    def test_parse_unit_unknown_raises(self):
+        with self.assertRaises(ValueError):
+            parse_unit('unknown')
+
+class MissingPriceFillerTests(TestCase):
+    def setUp(self):
+        # create USD rate stub (not used for USD conversion)
+        ExchangeRate.objects.create(
+            base_currency='THB', date=timezone.now().date(),
+            price=Decimal('40.0000'), open=Decimal('39'), high=Decimal('41'), low=Decimal('38'), change_percent=None
+        )
+        self.filler = MissingPriceFiller(dry_run=False, verbose=False)
+
+    def make_order(self, **kwargs):
+        defaults = {
+            'unit': 'CT', 'currency': 'USD', 'price_cur_per_unit': Decimal('10.00'),
+            'weight_per_piece': Decimal('0.50'), 'carats': Decimal('1.00'),
+            'date': timezone.now(), 'client_memo': 'P', 'book_no': 1, 'order_no': 1,
+            'supplier': 'Test', 'number': 1, 'stone': 'TestStone', 'heating': None,
+            'color': None, 'shape': None, 'size': None,
+            'total_thb': Decimal('10.00'), 'price_usd_per_ct': None,
+            'price_usd_per_piece': None, 'total_usd': None, 'rate_avg_2019': None,
+            'remarks': '', 'credit_term': '', 'target_size': ''
+        }
+        defaults.update(kwargs)
+        return SupplierOrder(**defaults)
+
+    def test_normalize_local_price_ct(self):
+        order = self.make_order(unit='ct', price_cur_per_unit=Decimal('5.00'))
+        per_ct = self.filler._normalize_local_price(order)
+        self.assertEqual(per_ct, Decimal('5.00'))
+
+    def test_normalize_local_price_pc(self):
+        order = self.make_order(unit='pc', price_cur_per_unit=Decimal('10.00'), weight_per_piece=Decimal('2.00'))
+        per_ct = self.filler._normalize_local_price(order)
+        self.assertEqual(per_ct, Decimal('5.00'))
+
+    def test_normalize_local_price_total(self):
+        order = self.make_order(unit='TOTAL', price_cur_per_unit=Decimal('20.00'), carats=Decimal('4.00'))
+        per_ct = self.filler._normalize_local_price(order)
+        self.assertEqual(per_ct, Decimal('5.00'))
+
+    def test_normalize_local_price_gram(self):
+        order = self.make_order(unit='g', price_cur_per_unit=Decimal('100.00'))
+        per_ct = self.filler._normalize_local_price(order)
+        # 100 per gram → per carat: 100 * 0.2 = 20.00
+        self.assertEqual(per_ct, Decimal('20.00'))
+
+    def test_normalize_local_price_kg(self):
+        order = self.make_order(unit='kg', price_cur_per_unit=Decimal('1000.00'))
+        # 1000 per kg → per gram: 1000/1000=1 → per carat: 1*0.2=0.20
+        per_ct = self.filler._normalize_local_price(order)
+        self.assertEqual(per_ct, Decimal('0.20'))
+
+    def test_fill_order_usd(self):
+        order = self.make_order(unit='PC', price_cur_per_unit=Decimal('10.00'), weight_per_piece=Decimal('2.00'))
+        self.filler._fill_order(order)
+        # local per ct = 5, USD per ct = 5, per piece = 5*2=10, total_usd = 5*1=5
+        self.assertEqual(order.price_usd_per_ct, Decimal('5.00'))
+        self.assertEqual(order.price_usd_per_piece, Decimal('10.00'))
+        self.assertEqual(order.total_usd, Decimal('5.00'))
+
+    def test_fill_order_non_usd(self):
+        # Use THB currency with rate 40 THB = 1 USD → 1 THB = 0.025 USD
+        order = self.make_order(unit='CT', price_cur_per_unit=Decimal('40.00'), currency='THB')
+        self.filler._fill_order(order)
+        # local per ct =40 → usd per ct =1.00, per piece & total
+        self.assertEqual(order.price_usd_per_ct, Decimal('1.00'))
+        self.assertEqual(order.price_usd_per_piece, Decimal('0.50'))
+        self.assertEqual(order.total_usd, Decimal('1.00'))
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+===== ./core/tests/__init__.py =====
+
+
+===== ./core/admin.py =====
+from django.contrib import admin
+from core.order_raw.models import OrderRaw
+from core.supplier_order.models import SupplierOrder
+from core.client_order.models import ClientOrder
+
+
+admin.site.register(OrderRaw)
+
+admin.site.register(SupplierOrder)
+# @admin.register(SupplierOrder)
+# class SupplierOrderAdmin(admin.ModelAdmin):
+#     list_display = (
+#         'date', 'supplier', 'order_no', 'stone', 'shape', 'color',
+#         'carats', 'price_cur_per_unit', 'currency', 'total_thb'
+#     )
+#     search_fields = ('supplier', 'order_no', 'stone', 'color', 'shape', 'remarks')
+#     list_filter = ('currency', 'supplier', 'shape', 'color', 'unit')
+#     ordering = ('-date',)
+#     date_hierarchy = 'date'
+
+===== ./core/supplier_order/services/imports.py =====
+
+
+===== ./core/supplier_order/services/transform.py =====
+# core/services/transforms/supplier_order_transform.py
+from django.db.models import F
+from django.db import transaction
+
+from core.common.services.filters.mapping import FieldMappingFilter
+from core.common.services.filters.type_parsing import TypeParsingFilter
+from core.common.services.filters.context import TransformContext
+from core.common.services.filters.validity import SupplierValidityFilter
+
+from core.order_raw.models import SupplierOrderRaw
+from core.supplier_order.models import SupplierOrder
+from core.supplier_order.mapping import SUPPLIER_COLUMN_MAPPING
+
+class SupplierContext(TransformContext):
+    """
+    Fields in attrs
+    'client_memo':          
+    'date':                 
+    'book_no':              
+    'order_no':             
+    'tax_invoice':          
+    'supplier':             
+    'number':               
+    'stone':                
+    'heating':              
+    'color':                
+    'shape':                
+    'size':                 
+    'carats':               
+    'currency':             
+    'price_cur_per_unit':   
+    'unit':                 
+    'total_thb':            
+    'weight_per_piece':     
+    'price_usd_per_ct':     
+    'price_usd_per_piece':  
+    'total_usd':            
+    'rate_avg_2019':        
+    'remarks':              
+    'credit_term':          
+    'target_size':          
+    """
+    def __init__(self, raw):
+        super().__init__(raw, SupplierOrder)
+        
+
+class SupplierOrderTransformer:
+    def __init__(self, dry_run=False):
+        self.dry_run = dry_run
+        # mapping → parsing → validité
+        self.filters = [
+            FieldMappingFilter(field_mapping=SUPPLIER_COLUMN_MAPPING),
+            TypeParsingFilter(order_model=SupplierOrder),
+            SupplierValidityFilter(),
+        ]
+
+    def transform_one(self, raw):
+        
+        ctx = TransformContext(raw, SupplierOrder)
+        
+       
+        try:
+            for filt in self.filters:
+                
+                if not filt.apply(ctx):
+                    raise ValueError(f"{ctx.error} from {filt}")
+            
+            ctx.instantiate_order()
+            ctx.order.full_clean()
+            
+        except Exception as e:
+            ctx.error = str(e)
+            return ctx
+        
+            
+        return ctx
+
+
+    def run(self, queryset=None, batch_size=1000):
+        orders_to_create = []
+        stats = {'total_raws': 0, 'orders_created': 0, 'raws_failed': 0, 'errors': {}}
+        key = {} # hash key to check doublon
+        for raw in queryset.iterator():
+            stats['total_raws'] += 1
+            ctx = self.transform_one(raw)
+
+            if ctx.error is None:
+                orders_to_create.append(ctx.order)
+                stats['orders_created'] += 1
+            else:
+                stats['raws_failed'] += 1
+                error_key = ctx.error[:10]
+                if not error_key in stats['errors'].keys():
+                    print(ctx.error)
+                    stats['errors'][error_key] = [f"{ctx.raw.sheet_name} - {ctx.raw.row_index} : {ctx.error}", 1]
+                else:
+                    stats['errors'][error_key][1] +=1
+
+            if len(orders_to_create) >= batch_size:
+                if not self.dry_run:
+                    with transaction.atomic():
+                        SupplierOrder.objects.bulk_create(
+                            orders_to_create, batch_size
+                        )
+                orders_to_create.clear()
+
+        if not self.dry_run and orders_to_create:
+            with transaction.atomic():
+                SupplierOrder.objects.bulk_create(
+                        orders_to_create, batch_size
+                    )
+        return stats
+
+===== ./core/supplier_order/services/exports.py =====
+import openpyxl
+from openpyxl.utils import get_column_letter
+from django.http import HttpResponse
+
+def export_orders_to_excel(queryset, filename="orders.xlsx", columns=None, fields=None):
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Orders"
+
+    # Write headers
+    for col_num, column_title in enumerate(columns, 1):
+        worksheet.cell(row=1, column=col_num, value=column_title)
+
+    # Write data
+    for row_num, obj in enumerate(queryset, 2):
+        row = []
+        for field in fields:
+            value = getattr(obj, field)
+            # Special format for dates and decimals
+            if hasattr(value, 'strftime'):
+                value = value.strftime('%Y-%m-%d')
+            elif value is None:
+                value = ''
+            row.append(value)
+
+        for col_num, cell_value in enumerate(row, 1):
+            worksheet.cell(row=row_num, column=col_num, value=cell_value)
+
+    # Adjust column widths (optional)
+    for i, _ in enumerate(columns, 1):
+        worksheet.column_dimensions[get_column_letter(i)].width = 15
+
+    # Prepare response
+    response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    workbook.save(response)
+
+    return response
+
+
+===== ./core/supplier_order/services/old_imports.py =====
+import sys
+import pandas as pd
+from django.db import IntegrityError
+
+from core.supplier_order.mapping import SUPPLIER_COLUMN_MAPPING
+from core.supplier_order.models import SupplierOrder
+from core.common.tools.parse import parse_date, parse_decimal, parse_int, parse_currency, parse_unit
+from core.common.tools.row import get_value_mapped, is_fully_invalid_row, is_duplicate_object
+
+# fields that define uniqueness for SupplierOrder
+UNIQUE_FIELDS = [
+    'supplier', 'order_no', 'number',
+    'stone', 'shape', 'color',
+    'size', 'carats', 'weight_per_piece'
+]
+
+COLUMN_REQUIRED = {
+    'order_no',
+    'supplier',
+    'number',
+    'stone',
+    'date'
+}
+
+MAPPING_CANCELED = {
+    'canceled',
+    'cancel ',
+    'cancel'
+}
+
+
+def get_value(row, field_name):
+    return get_value_mapped(row, field_name, SUPPLIER_COLUMN_MAPPING)
+
+def is_canceled(row):
+    for field in COLUMN_REQUIRED:
+        v = get_value(row, field)
+        if v is None or pd.isna(v):
+            return True
+        if isinstance(v, str) and v.strip().lower() in MAPPING_CANCELED:
+            return True
+    return False
+
+def check_field(df: pd.DataFrame):
+    return "Date" in df.columns
+
+def import_supplier_orders(file_path):
+    """Import supplier orders from `file_path`, skipping duplicates (DB and in-memory)."""
+    report = {
+        "imported": 0,
+        "skipped_invalid": 0,
+        "skipped_canceled": 0,
+        "skipped_not_p": 0,
+        "skipped_duplicates": 0,
+        "failed_rows": [],
+        "messages": [],
+        "total": 0,
+    }
+
+    # to track in-memory duplicates
+    seen_keys = set()
+    sheets = pd.read_excel(file_path, sheet_name=None)
+    achats = []
+
+    for sheet_name, df in sheets.items():
+        valid_count = 0
+        if not check_field(df):
+            report['messages'].append(
+                f"[SKIP] Sheet '{sheet_name}' missing required columns: {list(df.columns)}"
+            )
+            continue
+        report['messages'].append(f"[RUN] Processing sheet: {sheet_name}")
+
+        for idx, row in df.iterrows():
+            if is_fully_invalid_row(row):
+                continue
+            if get_value(row, 'client_memo') in {"M", "B"}:
+                report['skipped_not_p'] += 1
+                continue
+            if is_canceled(row):
+                report['skipped_canceled'] += 1
+                continue
+
+            try:
+                raw_date = get_value(row, 'date')
+                date_val = parse_date(raw_date)
+                if date_val is None:
+                    raise ValueError(f"Invalid date: {raw_date}")
+
+                # build a dict of init kwargs
+                kwargs = {
+                    'client_memo': get_value(row, 'client_memo') or "P",
+                    'date': date_val,
+                    'book_no': parse_int(get_value(row, 'book_no') or 0),
+                    'order_no': parse_int(get_value(row, 'order_no') or 0),
+                    'tax_invoice': get_value(row, 'tax_invoice'),
+                    'supplier': get_value(row, 'supplier'),
+                    'number': parse_int(get_value(row, 'number') or 0),
+                    'stone': get_value(row, 'stone'),
+                    'heating': get_value(row, 'heating'),
+                    'color': get_value(row, 'color'),
+                    'shape': get_value(row, 'shape'),
+                    'size': get_value(row, 'size'),
+                    'carats': parse_decimal(get_value(row, 'carats')) or 0,
+                    'currency': parse_currency(get_value(row, 'currency') or "THB"),
+                    'price_cur_per_unit': parse_decimal(get_value(row, 'price_cur_per_unit')) or 0,
+                    'unit': parse_unit(get_value(row, 'unit') or "CT"),
+                    'total_thb': parse_decimal(get_value(row, 'total_thb')) or 0,
+                    'weight_per_piece': parse_decimal(get_value(row, 'weight_per_piece')) if get_value(row, 'weight_per_piece') else None,
+                    'price_usd_per_ct': get_value(row, 'price_usd_per_ct'),
+                    'price_usd_per_piece': get_value(row, 'price_usd_per_piece'),
+                    'total_usd': get_value(row, 'total_usd'),
+                    'rate_avg_2019': get_value(row, 'rate_avg_2019'),
+                    'remarks': get_value(row, 'remarks'),
+                    'credit_term': get_value(row, 'credit_term'),
+                    'target_size': get_value(row, 'target_size'),
+                }
+
+                # compute in-memory uniqueness key
+                key = tuple(kwargs[field] for field in UNIQUE_FIELDS)
+                if key in seen_keys:
+                    report['skipped_duplicates'] += 1
+                    continue
+
+                # instantiate but don't save yet
+                achat = SupplierOrder(**kwargs)
+
+                # check DB-level duplicates
+                if is_duplicate_object(achat):
+                    report['skipped_duplicates'] += 1
+                    continue
+
+                # mark this key as seen and queue for bulk_create
+                seen_keys.add(key)
+                achats.append(achat)
+                report['imported'] += 1
+                valid_count += 1
+
+            except Exception as e:
+                report['skipped_invalid'] += 1
+                report['failed_rows'].append({
+                    "sheet": sheet_name,
+                    "row_index": idx,
+                    "error": str(e),
+                    "row_data": row.to_dict(),
+                })
+                report['messages'].append(
+                    f"[WARNING] Row {idx} in '{sheet_name}' failed: {e}"
+                )
+
+        report['messages'].append(
+            f"[DONE] Sheet '{sheet_name}': {valid_count} orders queued."
+        )
+
+    report["total"] = (
+        report['imported']
+        + report['skipped_canceled']
+        + report['skipped_invalid']
+        + report['skipped_not_p']
+        + report['skipped_duplicates']
+    )
+
+    # bulk insert, ignoring any remaining DB conflicts
+    try:
+        SupplierOrder.objects.bulk_create(achats, ignore_conflicts=True)
+    except Exception as e:
+        # in case of unexpected error, log summary then re-raise
+        sys.stdout.write(f"[INFO] Imported: {report['imported']}\n")
+        sys.stdout.write(f"[INFO] Skipped duplicates: {report['skipped_duplicates']}\n")
+        sys.stdout.write(f"[INFO] Skipped invalid: {report['skipped_invalid']}\n")
+        sys.stdout.write(f"[INFO] Skipped canceled: {report['skipped_canceled']}\n")
+        sys.stdout.write(f"[INFO] Skipped not-purchase: {report['skipped_not_p']}\n")
+        for msg in report['messages']:
+            sys.stdout.write(msg + "\n")
+        raise
+
+    return report
+
+
+===== ./core/supplier_order/services/__init__.py =====
+
+
+===== ./core/supplier_order/models.py =====
+# core/models/supplier_order.py
+from django.db import models
+from django.core.exceptions import ValidationError
+
+
+UNIQUE_SUPPLIER_LOT = (
+    'date','supplier','order_no','number',
+    'stone','shape','color','size','carats',
+    'weight_per_piece','price_usd_per_ct',
+)
+
+class SupplierOrder(models.Model):
+    """
+    Supplier order, it is a purchase.
+    """
+    class Meta:
+        unique_together = UNIQUE_SUPPLIER_LOT
+        constraints = [
+            models.UniqueConstraint(
+                fields=list(UNIQUE_SUPPLIER_LOT),
+                name='unique_supplier_lot'
+            )
+        ]
+        
+    raw = models.OneToOneField(
+        'SupplierOrderRaw',
+        on_delete=models.PROTECT,
+        related_name='interpreted',
+        blank=True,
+        null=True
+    )
+
+    # Info
+    date         = models.DateTimeField()
+    book_no      = models.IntegerField(blank=True, null=True, default=0)
+    order_no     = models.IntegerField(default=0)
+    supplier     = models.CharField(max_length=50)
+
+    # Stone
+    number            = models.IntegerField()
+    stone             = models.CharField(max_length=50) # to parse
+    heating           = models.CharField(max_length=20, blank=True, null=True)
+    color             = models.CharField(max_length=50, blank=True, null=True) # to parse
+    shape             = models.CharField(max_length=50, blank=True, null=True) # to parse
+    cutting           = models.CharField(max_length=50, blank=True, null=True) # to parse
+    size              = models.CharField(max_length=50, blank=True, null=True) # to parse
+    carats            = models.DecimalField(max_digits=10, decimal_places=3, blank=True, null=True)
+    weight_per_piece  = models.DecimalField(max_digits=10, decimal_places=3, blank=True, null=True)
+
+    # Price
+    price_usd_per_piece = models.DecimalField(max_digits=13, decimal_places=3)
+    price_usd_per_ct    = models.DecimalField(max_digits=13, decimal_places=3, blank=True, null=True)
+    total_usd           = models.DecimalField(max_digits=13, decimal_places=3, blank=True, null=True)
+    
+    def __str__(self):
+        return f"SupplierOrder {self.order_no} – {self.supplier} – {self.date.date()}"
+
+    def clean(self):
+        super().clean()
+        
+        filters = {f: getattr(self, f) for f in UNIQUE_SUPPLIER_LOT}
+        qs = SupplierOrder.objects.filter(**filters)
+        if self.pk:
+            qs = qs.exclude(pk=self.pk)
+        if qs.exists():
+            raise ValidationError({
+                '__all__': 'A supplier order with this combination of fields already exists.'
+            })
+
+
+
+
+===== ./core/supplier_order/views/export.py =====
+from core.supplier_order.models import SupplierOrder
+from core.supplier_order.mapping import SUPPLIER_ORDER_FIELDS
+from core.common.views.export import orders_export
+
+def supplier_orders_export(request):
+    return orders_export(
+        request=request, 
+        order_model=SupplierOrder,
+        order_fields=SUPPLIER_ORDER_FIELDS,
+        order_name="supplier"
+    )
+
+
+===== ./core/supplier_order/views/views.py =====
+from django.http import JsonResponse
+from django.shortcuts import render
+from django.views.decorators.csrf import csrf_exempt
+
+from core.supplier_order.models import SupplierOrder
+
+def supplier_orders_list(request):
+    """Work but bad memory management."""
+    orders = SupplierOrder.objects.all().order_by('-date')
+    return render(request, 'core/supplier_order/table.html', {'orders': orders})
+
+
+def supplier_orders_import_page(request):
+    return render(request, 'core/supplier_order/import.html')
+
+@csrf_exempt
+def fill_missing_prices(request):
+    """
+    Endpoint pour déclencher le remplissage des prix USD manquants.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid method"}, status=405)
+
+    # On récupère le paramètre dry_run si besoin (ou toujours False)
+    dry_run = request.POST.get("dry_run") == "true"
+    verbose = request.POST.get("verbose") == "true"
+
+    service = MissingPriceFiller(dry_run=dry_run, verbose=verbose)
+    report = service.run()
+
+    return JsonResponse(report)
+
+===== ./core/supplier_order/views/api.py =====
+
+from django.views.decorators.csrf import csrf_exempt
+
+from core.supplier_order.mapping import SUPPLIER_ORDER_FIELDS
+from core.supplier_order.models import SupplierOrder
+from core.common.views.wrapper_order.api.json import orders_json
+from core.common.views.wrapper_order.api.update import order_update
+
+    
+def supplier_orders_json(request):
+    return orders_json(
+        request,
+        model=SupplierOrder,
+        display_fields=SUPPLIER_ORDER_FIELDS,
+        search_fields=["stone", "color", "shape"],
+        related_search_fields=["supplier"],
+        filter_conditions={"currency": request.GET.get("currency")},
+        multi_value_filters=["shape", "color"],
+        date_range_filters=["date"]
+        )
+
+
+@csrf_exempt
+def supplier_order_update(request):
+    return order_update(
+        request=request,
+        order_model=SupplierOrder,
+        order_fields=SUPPLIER_ORDER_FIELDS
+    )
+
+
+
+===== ./core/supplier_order/views/import_.py =====
+
+from core.supplier_order.services.imports import import_supplier_orders
+from core.common.views.import_ import orders_import_upload
+
+def supplier_orders_import_upload(request):
+    return orders_import_upload(
+        request=request,
+        import_order_func=import_supplier_orders,
+        order_name="supplier"
+    )
+
+
+===== ./core/supplier_order/views/__init__.py =====
+from .views import supplier_orders_list, supplier_orders_import_page, fill_missing_prices
+from .api import supplier_orders_json, supplier_order_update
+from .export import supplier_orders_export
+from .import_ import supplier_orders_import_upload
+
+
+===== ./core/supplier_order/mapping.py =====
+# core/mappings/supplier_order.py
+
+SUPPLIER_ORDER_FIELDS = [
+    ("date", "Date"),
+    ("book_no", "Book No."),
+    ("order_no", "Order No."),
+    ("tax_invoice", "Tax Invoice"),
+    ("supplier", "Supplier"),
+    ("number", "PC"),
+    ("stone", "Stone"),
+    ("heating", "H/NH"),
+    ("color", "Color"),
+    ("shape", "Shape"),
+    ("size", "Size"),
+    ("carats", "Carats"),
+    ("currency", "Currency (US/THB)"),
+    ("price_cur_per_unit", "Price per Unit"),
+    ("unit", "PER"),
+    ("total_thb", "Total THB"),
+    ("weight_per_piece", "Weight per Piece"),
+    ("price_usd_per_ct", "Price $/ct"),
+    ("price_usd_per_piece", "Price $ per Piece"),
+    ("total_usd", "Total USD"),
+    ("rate_avg_2019", "Rate Avg 2019"),
+    ("remarks", "Remarks"),
+    ("credit_term", "Credit Term"),
+    ("target_size", "Target Size"),
+]
+
+
+RAW_SUPPLIER_COLUMN_MAPPING = {
+    'client_memo':          ['Client Memo', 'Purchase (P) Memo (M) Bargain (B)'],
+    'date':                 ['Date'],
+    'book_no':              ['Book No.', 'Book No'],
+    'order_no':             ['No.', 'Order No', 'No'],
+    'tax_invoice':          ['TAX INVOICE', 'Tax Invoice'],
+    'supplier':             ['CLIENT', 'Client', 'Supplier'],
+    'number':               ['PC', 'Pieces', 'Qty'],
+    'stone':                ['Stone', '  Stone'],
+    'heating':              ['H/NH', 'Heat/No Heat'],
+    'color':                ['Color', 'Colour'],
+    'shape':                ['Shape'],
+    'size':                 ['Size', 'Dimensions'],
+    'carats':               ['Carats', 'Weight (ct)'],
+    'currency':             ['US/THB', 'Currency'],
+    'price_cur_per_unit':   ['price', 'Price'],
+    'unit':                 ['PER', 'Unit'],
+    'total_thb':            ['Total', 'Total THB', 'THB Total'],
+    'weight_per_piece':     ['Weight per piece', 'Weight/Piece'],
+    'price_usd_per_ct':     ['price $/ct ', 'Price $/ct', 'Price per ct $'],
+    'price_usd_per_piece':  ['price/$ per piece', 'Price/$ per Piece'],
+    'total_usd':            ['Total $', 'USD Total'],
+    'rate_avg_2019':        ['Rate $ average 2019', '2019 Rate'],
+    'remarks':              ['Remarks', 'Notes'],
+    'credit_term':          ['CREDIT TERM', 'Credit Term'],
+    'target_size':          ['Target size', 'Target Size'],
+}
+
+SUPPLIER_COLUMN_MAPPING = {
+    'date':                 ['Date'],
+    'book_no':              ['Book No.', 'Book No'],
+    'order_no':             ['No.', 'Order No', 'No'],
+    'supplier':             ['CLIENT', 'Client', 'Supplier'],
+    'number':               ['PC', 'Pieces', 'Qty'],
+    'stone':                ['Stone', '  Stone'],
+    'heating':              ['H/NH', 'Heat/No Heat'],
+    'color':                ['Color', 'Colour'],
+    'shape':                ['Shape'],
+    'size':                 ['Size', 'Dimensions'],
+    'carats':               ['Carats', 'Weight (ct)'],
+    'weight_per_piece':     ['Weight per piece', 'Weight/Piece'],
+    'price_usd_per_ct':     ['price $/ct ', 'Price $/ct', 'Price per ct $'],
+    'price_usd_per_piece':  ['price/$ per piece', 'Price/$ per Piece'],
+    'total_usd':            ['Total $', 'USD Total'],
+}
+
+
+INVERSE_SUPPLIER_COLUMN_MAPPING = {
+    alias: field
+    for field, aliases in SUPPLIER_COLUMN_MAPPING.items()
+    for alias in aliases
+}
+
+
+===== ./core/supplier_order/management/commands/check_integrity_supplier_order.py =====
+# core/management/commands/check_data_integrity.py
+
+import json
+from datetime import date
+from django.core.management.base import BaseCommand
+from django.utils import timezone
+from django.db.models import Count, Q
+
+from core.supplier_order.models import SupplierOrder
+from core.client_order.models import ClientOrder
+from exchange_rate.models import ExchangeRate
+
+class Command(BaseCommand):
+    help = "Check data integrity across key models and report anomalies."
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--output",
+            type=str,
+            help="Optional path to write full JSON report"
+        )
+        parser.add_argument(
+            "--details",
+            action="store_true",
+            help="Also print detailed records for each anomaly type"
+        )
+
+    def handle(self, *args, **options):
+        now = timezone.now()
+        today = now.date()
+        report = {}
+
+        # 1) DUPLICATE SupplierOrder
+        dup_so = (
+            SupplierOrder.objects
+            .values(
+                "supplier", "order_no", "number",
+                "stone", "shape", "color",
+                "size", "carats"
+            )
+            .annotate(cnt=Count("id"))
+            .filter(cnt__gt=1)
+        )
+        report["duplicate_supplier_orders"] = []
+        for entry in dup_so:
+            filters = {
+                k: entry[k] for k in entry.keys() if k != "cnt"
+            }
+            qs = SupplierOrder.objects.filter(**filters)
+            for so in qs:
+                report["duplicate_supplier_orders"].append({
+                    "id": so.id,
+                    "order_no": so.order_no,
+                    "fields": filters
+                })
+
+        # 2) DUPLICATE ClientOrder
+        dup_co = (
+            ClientOrder.objects
+            .values("date", "order_no")
+            .annotate(cnt=Count("id"))
+            .filter(cnt__gt=1)
+        )
+        report["duplicate_client_orders"] = []
+        for entry in dup_co:
+            qs = ClientOrder.objects.filter(
+                date=entry["date"], order_no=entry["order_no"]
+            )
+            for co in qs:
+                report["duplicate_client_orders"].append({
+                    "id": co.id,
+                    "order_no": co.order_no,
+                    "fields": {"date": str(co.date), "order_no": co.order_no}
+                })
+
+        # 3) FUTURE DATES
+        report["future_supplier_orders"] = []
+        for so in SupplierOrder.objects.filter(date__gt=now):
+            report["future_supplier_orders"].append({
+                "id": so.id,
+                "order_no": so.order_no,
+                "fields": {"date": str(so.date)}
+            })
+        report["future_client_orders"] = []
+        for co in ClientOrder.objects.filter(date__gt=now):
+            report["future_client_orders"].append({
+                "id": co.id,
+                "order_no": co.order_no,
+                "fields": {"date": str(co.date)}
+            })
+        report["future_exchange_rates"] = []
+        for er in ExchangeRate.objects.filter(date__gt=today):
+            report["future_exchange_rates"].append({
+                "id": er.id,
+                "fields": {"base_currency": er.base_currency, "date": str(er.date)}
+            })
+
+        # 4) MISSING USD PRICES on SupplierOrder
+        report["supplier_orders_missing_usd"] = []
+        qs_missing = SupplierOrder.objects.filter(
+            Q(price_usd_per_ct__isnull=True) |
+            Q(price_usd_per_piece__isnull=True) |
+            Q(total_usd__isnull=True)
+        )
+        for so in qs_missing:
+            missing = []
+            if so.price_usd_per_ct is None:
+                missing.append("price_usd_per_ct")
+            if so.price_usd_per_piece is None:
+                missing.append("price_usd_per_piece")
+            if so.total_usd is None:
+                missing.append("total_usd")
+            report["supplier_orders_missing_usd"].append({
+                "id": so.id,
+                "order_no": so.order_no,
+                "missing_fields": missing
+            })
+
+        # 5) ORDERS WITHOUT MATCHING RATE
+        report["orders_without_exchange_rate"] = []
+        combos = (
+            SupplierOrder.objects
+            .exclude(currency="USD")
+            .values("currency", "date")
+            .distinct()
+        )
+        for combo in combos:
+            if not ExchangeRate.objects.filter(
+                base_currency=combo["currency"], date=combo["date"]
+            ).exists():
+                # lister toutes les commandes posant problème
+                for so in SupplierOrder.objects.filter(
+                    currency=combo["currency"], date=combo["date"]
+                ):
+                    report["orders_without_exchange_rate"].append({
+                        "id": so.id,
+                        "order_no": so.order_no,
+                        "fields": {"currency": so.currency, "date": str(so.date)}
+                    })
+
+        # 6) NEGATIVE OR ZERO VALUES
+        report["supplier_orders_invalid_values"] = []
+        qs_bad = SupplierOrder.objects.filter(
+            Q(price_cur_per_unit__lte=0) |
+            Q(total_thb__lte=0) |
+            Q(carats__lte=0)
+        )
+        for so in qs_bad:
+            bad = {}
+            if so.price_cur_per_unit <= 0:
+                bad["price_cur_per_unit"] = str(so.price_cur_per_unit)
+            if so.total_thb <= 0:
+                bad["total_thb"] = str(so.total_thb)
+            if so.carats <= 0:
+                bad["carats"] = str(so.carats)
+            report["supplier_orders_invalid_values"].append({
+                "id": so.id,
+                "order_no": so.order_no,
+                "invalid_fields": bad
+            })
+
+        # --- Output summary ---
+        self.stdout.write(self.style.MIGRATE_HEADING("Integrity Check Summary:"))
+        for key, items in report.items():
+            self.stdout.write(f"  {key}: {len(items)} issue{'s' if len(items) != 1 else ''}")
+
+        # Details?
+        if options["details"]:
+            self.stdout.write(self.style.MIGRATE_LABEL("\nDetails:"))
+            for key, items in report.items():
+                if not items:
+                    continue
+                self.stdout.write(self.style.NOTICE(f"\n{key}"))
+                for item in items:
+                    self.stdout.write(f"  - ID {item['id']} | order_no={item.get('order_no')} | fields={item.get('fields') or item.get('missing_fields') or item.get('invalid_fields')}")
+
+        # Full JSON dump?
+        if options.get("output"):
+            path = options["output"]
+            with open(path, "w") as f:
+                json.dump(report, f, default=str, indent=2)
+            self.stdout.write(self.style.SUCCESS(f"\nFull report written to {path}"))
+
+
+===== ./core/supplier_order/management/commands/delete_supplier_db.py =====
+# core/management/commands/delete_supplier_db.py
+
+from django.core.management.base import BaseCommand
+from core.supplier_order.models import SupplierOrder
+
+class Command(BaseCommand):
+    help = "Delete supplier orders database."
+
+    def handle(self, *args, **kwargs):
+        size = len(SupplierOrder.objects.all())
+        SupplierOrder.objects.all().delete()
+        self.stdout.write(self.style.SUCCESS(f"[DONE] Supplier orders database has been cleared ({size} elements have been deleted)."))
+        
+
+
+===== ./core/supplier_order/management/commands/export_supplier_orders.py =====
+from django.core.management.base import BaseCommand
+import openpyxl
+from openpyxl.utils import get_column_letter
+from core.supplier_order.models import SupplierOrder
+
+class Command(BaseCommand):
+    help = "Export Supplier Orders into an Excel file."
+
+    def handle(self, *args, **kwargs):
+        filename = 'supplier_orders_export.xlsx'
+        self.stdout.write(f"[INFO] Exporting supplier orders to {filename}...")
+
+        workbook = openpyxl.Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Supplier Orders"
+
+        # Define columns and fields
+        columns = [
+            "Date", "Book No.", "Order No.", "Tax Invoice", "Supplier",
+            "PC", "Stone", "H/NH", "Color", "Shape", "Size",
+            "Carats", "Currency", "Price per Unit", "Unit",
+            "Total THB", "Weight per Piece", "Price $/ct",
+            "Price $ per Piece", "Total USD", "Rate Avg 2019",
+            "Remarks", "Credit Term", "Target Size"
+        ]
+        fields = [
+            "date", "book_no", "order_no", "tax_invoice", "supplier",
+            "number", "stone", "heating", "color", "shape", "size",
+            "carats", "currency", "price_cur_per_unit", "unit",
+            "total_thb", "weight_per_piece", "price_usd_per_ct",
+            "price_usd_per_piece", "total_usd", "rate_avg_2019",
+            "remarks", "credit_term", "target_size"
+        ]
+
+        # Write header
+        for col_num, column_title in enumerate(columns, 1):
+            worksheet.cell(row=1, column=col_num, value=column_title)
+
+        # Write rows
+        orders = SupplierOrder.objects.all().order_by('-date')
+        for row_num, order in enumerate(orders, 2):
+            row = []
+            for field in fields:
+                value = getattr(order, field)
+                if hasattr(value, 'strftime'):
+                    value = value.strftime('%Y-%m-%d')
+                elif value is None:
+                    value = ''
+                row.append(value)
+
+            for col_num, cell_value in enumerate(row, 1):
+                worksheet.cell(row=row_num, column=col_num, value=cell_value)
+
+        # Adjust column widths
+        for i, _ in enumerate(columns, 1):
+            worksheet.column_dimensions[get_column_letter(i)].width = 15
+
+        # Save to file
+        workbook.save(filename)
+
+        self.stdout.write(self.style.SUCCESS(f"[DONE] Exported {orders.count()} supplier orders to '{filename}'"))
+
+
+===== ./core/supplier_order/management/commands/import_supplier_orders.py =====
+# core/management/commands/import_supplier_orders.py
+
+from django.core.management.base import BaseCommand
+
+class Command(BaseCommand):
+    help = "Import supplier orders from an Excel file (.xls/.xlsx)."
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            'file_path',
+            type=str,
+            help="The path to the Excel file containing the supplier orders."
+        )
+        
+        parser.add_argument(
+            '--verbose',
+            type=bool,
+            default=False
+        )
+
+    def handle(self, *args, **kwargs):
+        file_path = kwargs['file_path']
+
+        self.stdout.write(self.style.WARNING(f"Importing supplier orders from {file_path}..."))
+
+        try:
+            report = import_supplier_orders(file_path)
+            
+            self.stdout.write(self.style.SUCCESS(
+                f"[DONE] Import completed. {report['imported']}/{report['total']} supplier orders inserted."
+            ))
+
+            self.stdout.write(f"[INFO] {len(report['failed_rows'])} rows failed to import.\n")
+            self.stdout.write(f"[INFO] {report['skipped_canceled']} canceled orders skipped.\n")
+            self.stdout.write(f"[INFO] {report['skipped_not_p']} non-purchase orders skipped.\n")
+            self.stdout.write(f"[INFO] {report['skipped_duplicates']} duplicate orders skipped.\n")
+            
+            if kwargs['verbose']:
+                self.stdout.write(f"[INFO] Errors messages :\n")
+
+                for message in report['messages']:
+                    self.stdout.write("\t"+message+"\n")
+                
+            
+        except Exception as e:
+            self.stderr.write(self.style.ERROR(f"[ERROR] An error occurred during import: {str(e)}"))
+
+
+===== ./core/supplier_order/management/commands/transform_supplier_orders.py =====
+from django.core.management.base import BaseCommand
+from core.order_raw.models import SupplierOrderRaw
+from core.supplier_order.services.transform import SupplierOrderTransformer
+
+class Command(BaseCommand):
+    help = "Transforme les raws fournisseurs en SupplierOrder."
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Simulate the command without saving it."
+        )
+        parser.add_argument(
+            "--batch-size",
+            type=int,
+            default=1000,
+            help="Size of the flunch (higher is quicker but use more memory)."
+        )
+
+
+    def handle(self, *args, **kwargs):
+        transformer = SupplierOrderTransformer(dry_run=kwargs["dry_run"])
+        qs = SupplierOrderRaw.objects.filter(interpreted__isnull=True)
+        stats = transformer.run(queryset=qs, batch_size=kwargs["batch_size"])
+        if stats["orders_created"] == 0:
+            self.stdout.write(self.style.ERROR(
+                f"Transform error (0 orders created) :\n"
+                f"  total raws : {stats['total_raws']}\n"
+                f"  orders created : {stats['orders_created']}\n"
+                f"  raws errors : {stats['raws_failed']}"
+            ))
+            self.stdout.write(self.style.ERROR("First 10 samples of errors\n"))
+            for _, error in zip(range(10), stats['errors'].values()):
+                self.stdout.write(self.style.ERROR(f"{error[1]} of {error[0]}\n"))
+
+        else:
+            self.stdout.write(self.style.SUCCESS(
+                f"Transform done :\n"
+                f"  total raws : {stats['total_raws']}\n"
+                f"  orders created : {stats['orders_created']}\n"
+                f"  raws errors : {stats['raws_failed']}"
+            ))
+            self.stdout.write(self.style.ERROR("First 10 samples of errors\n"))
+            for _, error in zip(range(10), stats['errors'].values()):
+                self.stdout.write(self.style.ERROR(f"{error[1]} of {error[0]}\n"))
+
+
+
+===== ./core/supplier_order/management/commands/__init__.py =====
+
+
+===== ./core/supplier_order/management/commands/fill_missing_prices.py =====
+from django.core.management.base import BaseCommand
+from core.services.tools.order_pricing import MissingPriceFiller
+
+class Command(BaseCommand):
+    help = "Fill missing USD price fields on SupplierOrder."
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Show what would be updated, without saving."
+        )
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="Verbose logging of each order processed."
+        )
+
+    def handle(self, *args, **options):
+        service = MissingPriceFiller(
+            dry_run=options["dry_run"],
+            verbose=options["verbose"],
+        )
+        report = service.run()
+
+        self.stdout.write(self.style.SUCCESS(
+            f"Processed {report['to_update']} orders, updated {report['updated']}."
+        ))
+        if report["errors"]:
+            self.stdout.write(self.style.WARNING(
+                f"{len(report['errors'])} orders failed to convert:"
+            ))
+            for err in report["errors"]:
+                self.stdout.write(f" - Order {err['order_id']}: {err['error']}")
+
+
+===== ./core/supplier_order/__init__.py =====
+
+
+===== ./core/client_order/models.py =====
+from django.db import models
+from django.core.exceptions import ValidationError
+
+class Client(models.Model):
+    name = models.CharField(max_length=255)
+
+class Supplier(models.Model):
+    name = models.CharField(max_length=255)
+
+class ClientOrder(models.Model):
+    """An Order made by a client.
+
+    ::note:
+        The 'total_price_thb' is at the change rate of 'date' 
+    """
+    order_no = models.IntegerField()
+    client:Client = models.ForeignKey(Client, on_delete=models.CASCADE)
+    date = models.DateTimeField()
+    total_price_usd = models.DecimalField(max_digits=10, decimal_places=2)
+    # "At the rate when the command was made"
+    total_price_thb = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    total_weight = models.DecimalField(max_digits=4, decimal_places=2)
+    
+    def __str__(self):
+        return f"Client Order {self.id} - {self.client.name}"
+
+
+===== ./core/order_raw/services/imports.py =====
+# core/services/supplier_order_raw_import.py
+
+import pandas as pd
+import numpy as np
+from django.db import transaction
+from core.order_raw.models import OrderRaw, SupplierOrderRaw, ClientOrderRaw
+
+class OrderRawImportService:
+    """
+    Import all rows from an Excel into OrderRaw.
+    """
+
+    def __init__(self, file_path: str, order_type: str):
+        self.file_path = file_path
+        if order_type == 'supplier':
+            self.order_model = SupplierOrderRaw 
+        elif order_type == 'client':
+            self.order_model = ClientOrderRaw
+        else:
+            self.order_model = OrderRaw
+
+    def _serialize_value(self, v):
+        if pd.isna(v):
+            return ""
+        if isinstance(v, pd.Timestamp):
+            return v.to_pydatetime().isoformat()
+        return str(v)
+        
+    def _has_meaningful_data(self, payload: dict) -> bool:
+        for v in payload.values():
+            if v not in (None, "", 0, 0.0):
+                return True
+        return False
+
+    
+    def run(self) -> dict:
+        report = {'imported': 0, 'skipped': 0, 'failed': []}
+        sheets = pd.read_excel(self.file_path, sheet_name=None)
+
+        for sheet_name, df in sheets.items():
+            instances = []
+            for idx, row in df.iterrows():
+                payload = {k: self._serialize_value(v) for k, v in row.to_dict().items()}
+                if self._has_meaningful_data(payload):
+                    instances.append(self.order_model(
+                        source_file=self.file_path,
+                        sheet_name=sheet_name,
+                        row_index=idx,
+                        data=payload
+                    ))
+                else:
+                    report['skipped']+=1
+            with transaction.atomic():
+                self.order_model.objects.bulk_create(instances, batch_size=500)
+            report['imported'] += len(instances)
+
+        return report
+
+
+
+
+===== ./core/order_raw/models.py =====
+# core/models/order_raw.py
+
+from django.db import models
+from django.core.serializers.json import DjangoJSONEncoder
+
+class OrderRaw(models.Model):
+    """
+    Raw data just as the file imported.
+    """
+    source_file = models.CharField(max_length=255)
+    sheet_name  = models.CharField(max_length=255, blank=True, null=True)
+    row_index   = models.IntegerField(blank=True, null=True)
+    data        = models.JSONField(
+        help_text="Raw data from Excel line",
+        encoder=DjangoJSONEncoder)
+
+class SupplierOrderRaw(models.Model):
+    class Meta:
+        verbose_name = "Raw Supplier Order"
+        verbose_name_plural = "Raw Supplier Orders"
+        
+    source_file = models.CharField(max_length=255)
+    sheet_name  = models.CharField(max_length=255, blank=True, null=True)
+    row_index   = models.IntegerField(blank=True, null=True)
+    data        = models.JSONField(
+        help_text="Raw data from Excel line",
+        encoder=DjangoJSONEncoder)
+
+    def __str__(self):
+        return f"RawSupplier #{self.id} – row {self.row_index}"
+
+
+class ClientOrderRaw(models.Model):
+    class Meta:
+        verbose_name = "Raw Client Order"
+        verbose_name_plural = "Raw Client Orders"
+
+    source_file = models.CharField(max_length=255)
+    sheet_name  = models.CharField(max_length=255, blank=True, null=True)
+    row_index   = models.IntegerField(blank=True, null=True)
+    data        = models.JSONField(
+        help_text="Raw data from Excel line",
+        encoder=DjangoJSONEncoder)
+
+
+       
+    def __str__(self):
+        return f"RawClient #{self.id} – row {self.row_index}"
+
+
+
+===== ./core/order_raw/management/commands/delete_raw.py =====
+# core/management/commands/import_supplier_orders.py
+
+from django.core.management.base import BaseCommand
+from core.order_raw.models import OrderRaw, SupplierOrderRaw, ClientOrderRaw
+
+class Command(BaseCommand):
+    help = "Delete supplier orders database."
+    
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--type',
+            type=str,
+            help="Type of order [supplier, client, other].",
+            default="other"
+        )
+    def handle(self, *args, **kwargs):
+        if kwargs['type'] == 'supplier':
+            order_model = SupplierOrderRaw
+        elif kwargs['type'] == 'client':
+            order_model = ClientOrderRaw
+        else:
+            order_model = OrderRaw
+            kwargs['type'] = ""
+        size = len(order_model.objects.all())
+        order_model.objects.all().delete()
+        self.stdout.write(self.style.SUCCESS(f"[DONE] Raw orders {kwargs['type']} has been cleared ({size} elements have been deleted)."))
+        
+
+
+===== ./core/order_raw/management/commands/import_raw.py =====
+# core/management/commands/import_supplier_raw.py
+
+from django.core.management.base import BaseCommand, CommandError
+from core.order_raw.services.imports import OrderRawImportService
+
+class Command(BaseCommand):
+    help = "Import raw orders from an Excel file."
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            'file_path',
+            type=str,
+            help="Path to the Excel file to import."
+        )
+        parser.add_argument(
+            '--type',
+            type=str,
+            help="Type of order [supplier, client].",
+            default="supplier"
+        )
+
+    def handle(self, *args, **kargs):
+        file_path = kargs['file_path']
+        order_type = kargs['type']
+        service = OrderRawImportService(file_path, order_type)
+        try:
+            report = service.run()
+        except RuntimeError as e:
+            raise CommandError(str(e))
+
+        self.stdout.write(self.style.SUCCESS(
+            f"Imported {report['imported']} raw {order_type} rows."
+        ))
+        if report['failed']:
+            self.stdout.write(self.style.ERROR(
+                f"{len(report['failed'])} rows {order_type} failed to import:"
+            ))
+            for f in report['failed']:
+                self.stdout.write(f"  [Sheet {f['sheet']} row {f['row']}] {f['error']}")
+
+
+===== ./core/order_raw/management/commands/__init__.py =====
+
+
+===== ./core/order_raw/tests.py =====
+
+
+===== ./core/__init__.py =====
+
+
+===== ./core/apps.py =====
+from django.apps import AppConfig
+
+
+class CoreConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'core'
+
+
+===== ./exchange_rate/services/fetch_and_store_rate.py =====
+import requests
+from decimal import Decimal
+from datetime import date
+from django.conf import settings
+from exchange_rate.models import ExchangeRate
+
+API_URL = "https://api.apilayer.com/exchangerates_data/"
+
+def fetch_and_store_exchange_rate(target_date: date, base_currency="USD"):
+    formatted_date = target_date.isoformat()
+    api_key = settings.EXCHANGE_RATE_API_KEY
+
+    if not api_key:
+        raise ValueError("Missing API key for exchange rate service.")
+
+    url = f"{API_URL}{formatted_date}?base={base_currency}&symbols=THB"
+    headers = {"apikey": api_key}
+    response = requests.get(url, headers=headers)
+
+    if response.status_code != 200:
+        raise ValueError(f"API Error: {response.status_code} - {response.text}")
+
+    data = response.json()
+    try:
+        usd_to_thb = Decimal(data["rates"]["THB"])
+        thb_to_usd = Decimal("1.0") / usd_to_thb
+    except Exception as e:
+        raise ValueError(f"Invalid response format: {data}") from e
+
+    ExchangeRate.objects.update_or_create(
+        date=target_date,
+        base_currency=base_currency,
+        defaults={
+            "price": usd_to_thb,
+            "open": usd_to_thb,
+            "high": usd_to_thb,
+            "low": usd_to_thb,
+            "change_percent": None,
+            "usd_to_thb": usd_to_thb,
+            "thb_to_usd": thb_to_usd
+        }
+    )
+
+
+===== ./exchange_rate/services/conversion.py =====
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+
+from exchange_rate.models import ExchangeRate
+from exchange_rate.tools.parser import parse_decimal
+
+class CurrencyConversionError(Exception):
+    pass
+
+def _to_decimal(amount):
+    try:
+        return parse_decimal(amount)    
+    except (InvalidOperation, ValueError):
+        raise CurrencyConversionError(f"Invalid amount for conversion: {amount}")
+
+def _normalize_date(dt):
+    return dt.date() if isinstance(dt, datetime) else dt
+
+def convert_from_usd(amount, date, to_currency='THB') -> Decimal:
+    amount = _to_decimal(amount)    
+
+    if to_currency.upper() == 'USD':
+        return amount
+    
+    date = _normalize_date(date)
+
+    try:
+        rate = ExchangeRate.objects.get(date=date, base_currency=to_currency)
+    except ExchangeRate.DoesNotExist:
+        raise CurrencyConversionError(f"No exchange rate available for {date} for {to_currency}")
+    return (amount * rate.price).quantize(Decimal('0.0001'))
+
+
+def convert_to_usd(amount, date, from_currency='THB') -> Decimal:
+    amount = _to_decimal(amount)    
+    
+    if from_currency.upper() == 'USD':
+        return amount
+    
+    date = _normalize_date(date)
+
+    try:
+        rate = ExchangeRate.objects.get(date=date, base_currency=from_currency)
+    except ExchangeRate.DoesNotExist:
+        raise CurrencyConversionError(f"No exchange rate available for {date} for {from_currency}")
+    return (amount * rate.inverse_price).quantize(Decimal('0.0001'))
+
+def convert(amount, date, from_currency='THB', to_currency='USD') -> Decimal:
+    if from_currency == 'USD':
+        return convert_from_usd(amount, date, to_currency)
+    elif to_currency == 'USD':
+        return convert_to_usd(amount, date, from_currency)
+    
+    usd_amount = convert_to_usd(amount, date, from_currency)
+    return convert_from_usd(usd_amount, date, to_currency)
+
+
+
+===== ./exchange_rate/models.py =====
+from decimal import Decimal
+from django.db import models
+
+ONE = Decimal('1')
+
+class ExchangeRate(models.Model):
+    
+    class Meta:
+        unique_together = ('base_currency', 'date')
+        constraints = [
+            models.UniqueConstraint(
+                fields=['base_currency', 'date'],
+                name='unique_rate_exchange'
+            )
+        ]
+    base_currency = models.CharField(max_length=3) #USD, EUR, THB, ...
+    date = models.DateField()
+    price = models.DecimalField(max_digits=10, decimal_places=4)   # 1 USD = price base_currency
+    open = models.DecimalField(max_digits=10, decimal_places=4)
+    high = models.DecimalField(max_digits=10, decimal_places=4)
+    low = models.DecimalField(max_digits=10, decimal_places=4)
+    change_percent = models.CharField(max_length=10, blank=True, null=True)  
+
+    @property
+    def inverse_price(self):
+        return ONE / self.price
+
+    def __str__(self):
+        return f"{self.date} | 1 USD = {self.price} {self.base_currency}"
+
+
+===== ./exchange_rate/tools/parser.py =====
+from decimal import Decimal
+
+def parse_decimal(number):
+    if isinstance(number, Decimal):
+        return number
+    return Decimal(str(number))
+    
+
+===== ./exchange_rate/tools/__init__.py =====
+
+
+===== ./exchange_rate/history_tools.py =====
+import pandas
+
+
+def update_history():
+    ...
+
+===== ./exchange_rate/tests/test_currency_conversion.py =====
+from decimal import Decimal
+from datetime import date
+
+from django.test import TestCase
+from exchange_rate.models import ExchangeRate
+from exchange_rate.services.conversion import (
+    convert_from_usd,
+    convert_to_usd,
+    convert,
+    CurrencyConversionError,
+)
+
+class CurrencyConversionTests(TestCase):
+    def setUp(self):
+        # Define two imaginary currencies on the same date
+        # 1 USD = 2 ABC
+        ExchangeRate.objects.create(
+            base_currency='ABC',
+            date=date(2025, 5, 1),
+            price=Decimal('2.0000'),
+            open=Decimal('1.9000'),
+            high=Decimal('2.1000'),
+            low=Decimal('1.8000'),
+            change_percent='0.00%'
+        )
+        # 1 USD = 4 XYZ
+        ExchangeRate.objects.create(
+            base_currency='XYZ',
+            date=date(2025, 5, 1),
+            price=Decimal('4.0000'),
+            open=Decimal('3.9000'),
+            high=Decimal('4.1000'),
+            low=Decimal('3.8000'),
+            change_percent='0.00%'
+        )
+
+    def test_convert_from_usd_to_abc(self):
+        # 5 USD -> 10 ABC
+        result = convert_from_usd(Decimal('5'), date(2025, 5, 1), to_currency='ABC')
+        self.assertEqual(result, Decimal('10.0000'))
+
+    def test_convert_to_usd_from_abc(self):
+        # 10 ABC -> 5 USD
+        result = convert_to_usd(Decimal('10'), date(2025, 5, 1), from_currency='ABC')
+        self.assertEqual(result, Decimal('5.0000'))
+
+    def test_cross_conversion_abc_to_xyz(self):
+        # 10 ABC -> 5 USD -> 20 XYZ
+        result = convert(Decimal('10'), date(2025, 5, 1), from_currency='ABC', to_currency='XYZ')
+        self.assertEqual(result, Decimal('20.0000'))
+
+    def test_cross_conversion_xyz_to_abc(self):
+        # 20 XYZ -> 5 USD -> 10 ABC
+        result = convert(Decimal('20'), date(2025, 5, 1), from_currency='XYZ', to_currency='ABC')
+        self.assertEqual(result, Decimal('10.0000'))
+
+    def test_identity_conversion_usd(self):
+        # USD to USD remains unchanged
+        amount = Decimal('123.45')
+        self.assertEqual(convert(amount, date(2025, 5, 1), from_currency='USD', to_currency='USD'), amount)
+
+    def test_missing_rate_raises_for_imaginary(self):
+        # No rate defined for currency 'FOO' on that date
+        with self.assertRaises(CurrencyConversionError):
+            convert_from_usd(Decimal('1'), date(2025, 5, 1), to_currency='FOO')
+        with self.assertRaises(CurrencyConversionError):
+            convert_to_usd(Decimal('1'), date(2025, 5, 1), from_currency='FOO')
+
+
+===== ./exchange_rate/tests/__init__.py =====
+
+
+===== ./exchange_rate/tests/test_exchange_rate_uniqueness.py =====
+from decimal import Decimal
+from datetime import date
+
+from django.test import TestCase
+from django.db import IntegrityError
+from django.core.exceptions import ValidationError
+
+from exchange_rate.models import ExchangeRate
+
+
+class ExchangeRateUniquenessTests(TestCase):
+    def setUp(self):
+        # 1 USD = 10 IMC (Imaginary Coin) on 2025-05-01
+        self.rate = ExchangeRate.objects.create(
+            base_currency='IMC',
+            date=date(2025, 5, 1),
+            price=Decimal('10.0000'),
+            open=Decimal('9.5000'),
+            high=Decimal('10.5000'),
+            low=Decimal('9.0000'),
+            change_percent='0.00%'
+        )
+
+    def test_duplicate_create_raises_integrity_error(self):
+        """
+        Tenter de créer une deuxième ligne avec la même base_currency et date
+        doit lever un IntegrityError au moment du save()
+        """
+        with self.assertRaises(IntegrityError):
+            ExchangeRate.objects.create(
+                base_currency='IMC',
+                date=date(2025, 5, 1),
+                price=Decimal('11.0000'),
+                open=Decimal('10.5000'),
+                high=Decimal('11.5000'),
+                low=Decimal('10.0000'),
+                change_percent='1.00%'
+            )
+
+    def test_full_clean_raises_validation_error(self):
+        """
+        full_clean() doit détecter le doublon (à partir de unique_together)
+        et lever un ValidationError avant le save()
+        """
+        dup = ExchangeRate(
+            base_currency='IMC',
+            date=date(2025, 5, 1),
+            price=Decimal('11.0000'),
+            open=Decimal('10.5000'),
+            high=Decimal('11.5000'),
+            low=Decimal('10.0000'),
+            change_percent='1.00%'
+        )
+        with self.assertRaises(ValidationError):
+            dup.full_clean()
+
+    def test_different_currency_same_date_is_allowed(self):
+        """
+        On peut créer un taux pour une autre devise à la même date sans erreur.
+        """
+        other = ExchangeRate.objects.create(
+            base_currency='XYZ',
+            date=date(2025, 5, 1),
+            price=Decimal('5.0000'),
+            open=Decimal('4.8000'),
+            high=Decimal('5.2000'),
+            low=Decimal('4.5000'),
+            change_percent='0.50%'
+        )
+        # Vérification que l'objet a bien été sauvegardé
+        self.assertEqual(other.base_currency, 'XYZ')
+        self.assertEqual(other.date, date(2025, 5, 1))
+        self.assertEqual(ExchangeRate.objects.count(), 2)
+
+
+===== ./exchange_rate/admin.py =====
+from django.contrib import admin
+
+from exchange_rate.models import ExchangeRate
+
+
+@admin.register(ExchangeRate)
+class ExchangeRateAdmin(admin.ModelAdmin):
+    list_display = ('date', 'base_currency', 'price', 'open', 'high', 'low', 'change_percent')
+
+
+===== ./exchange_rate/management/commands/delete_exchange_rate_db.py =====
+# core/management/commands/import_supplier_orders.py
+
+from django.core.management.base import BaseCommand
+from exchange_rate.models import ExchangeRate
+
+class Command(BaseCommand):
+    help = "Delete supplier orders database."
+
+    def handle(self, *args, **kwargs):
+        size = len(ExchangeRate.objects.all())
+        ExchangeRate.objects.all().delete()
+        self.stdout.write(self.style.SUCCESS(f"[DONE] Supplier orders database has been cleared ({size} elements have been deleted)."))
+        
+
+
+===== ./exchange_rate/management/commands/import_exchange_rates.py =====
+import csv
+from datetime import datetime
+from decimal import Decimal
+from django.core.management.base import BaseCommand
+from exchange_rate.models import ExchangeRate
+
+# exchange_rate/management/commands/import_exchange_rates.py
+
+from django.core.management.base import BaseCommand
+from exchange_rate.models import ExchangeRate
+from datetime import datetime
+from decimal import Decimal
+import csv
+
+class Command(BaseCommand):
+    help = 'Import full exchange rate CSV (no volume)'
+
+    def add_arguments(self, parser):
+        parser.add_argument('csv_file', type=str)
+        parser.add_argument('--currency',  type=str, default='THB', help='Base currency, e.g. USD or THB')
+
+    def handle(self, *args, **kargs):
+        file_path = kargs['csv_file']
+        base_currency = kargs['currency']
+        with open(file_path, newline='', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            # if '\ufeffDate' in reader.fieldnames:
+            #     reader.fieldnames = [field.replace('\ufeff', '') for field in reader.fieldnames]
+            reader.fieldnames = [field.strip().replace('\ufeff', '').replace('"', '') for field in reader.fieldnames]
+
+            count = 0
+            for row in reader:
+                try:
+                    date = datetime.strptime(row.get('Date', '').strip(), '%m/%d/%Y').date()
+                    price = Decimal(row.get('Price', '0').replace(',', ''))
+                    open_ = Decimal(row.get('Open', '0').replace(',', ''))
+                    high = Decimal(row.get('High', '0').replace(',', ''))
+                    low = Decimal(row.get('Low', '0').replace(',', ''))
+                    change = row.get('Change %', '').strip() if 'Change %' in row else None
+
+                    ExchangeRate.objects.update_or_create(
+                        date=date,
+                        defaults={
+                            'base_currency': base_currency,
+                            'price': price,
+                            'open': open_,
+                            'high': high,
+                            'low': low,
+                            'change_percent': change,
+                            'usd_to_thb': price,
+                            'thb_to_usd': Decimal(1) / price
+                        }
+                    )
+                    count += 1
+                except Exception as e:
+                    self.stderr.write(f"Error on row {row}: {e}")
+            self.stdout.write(f"Imported {count} exchange rate entries.")
+
+
+===== ./exchange_rate/views.py =====
+from django.shortcuts import render
+
+# Create your views here.
+
+
+===== ./exchange_rate/__init__.py =====
+
+
+===== ./exchange_rate/apps.py =====
+from django.apps import AppConfig
+
+
+class ExchangeRateConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'exchange_rate'
+
+
+===== ./PiatInventory/urls.py =====
+"""
+URL configuration for PiatInventory project.
+
+The `urlpatterns` list routes URLs to views. For more information please see:
+    https://docs.djangoproject.com/en/5.2/topics/http/urls/
+Examples:
+Function views
+    1. Add an import:  from my_app import views
+    2. Add a URL to urlpatterns:  path('', views.home, name='home')
+Class-based views
+    1. Add an import:  from other_app.views import Home
+    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
+Including another URLconf
+    1. Import the include() function: from django.urls import include, path
+    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
+"""
+from django.contrib import admin
+from django.urls import path, include
+
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('', include("core.urls")),
+]
+
+
+===== ./PiatInventory/wsgi.py =====
+"""
+WSGI config for PiatInventory project.
+
+It exposes the WSGI callable as a module-level variable named ``application``.
+
+For more information on this file, see
+https://docs.djangoproject.com/en/5.2/howto/deployment/wsgi/
+"""
+
+import os
+
+from django.core.wsgi import get_wsgi_application
+
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'PiatInventory.settings')
+
+application = get_wsgi_application()
+
+
+===== ./PiatInventory/settings.py =====
+"""
+Django settings for PiatInventory project.
+
+Generated by 'django-admin startproject' using Django 5.2.
+
+For more information on this file, see
+https://docs.djangoproject.com/en/5.2/topics/settings/
+
+For the full list of settings and their values, see
+https://docs.djangoproject.com/en/5.2/ref/settings/
+"""
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+# API KEY
+EXCHANGE_RATE_API_KEY = os.getenv("EXCHANGE_RATE_API_KEY")
+
+# Build paths inside the project like this: BASE_DIR / 'subdir'.
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+# Quick-start development settings - unsuitable for production
+# See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
+
+# SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY = 'django-insecure-1csnttm2qw0zx7@30cag6f^2=w(+2j%@bcxf-n@78vzt95n31+'
+
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = True
+
+ALLOWED_HOSTS = []
+
+
+# Application definition
+
+INSTALLED_APPS = [
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.sessions',
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+    'core',
+    'exchange_rate'
+        
+]
+
+MIDDLEWARE = [
+    'django.middleware.security.SecurityMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.middleware.common.CommonMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+]
+
+ROOT_URLCONF = 'PiatInventory.urls'
+
+TEMPLATES = [
+    {
+        'BACKEND': 'django.template.backends.django.DjangoTemplates',
+        'DIRS': [],
+        'APP_DIRS': True,
+        'OPTIONS': {
+            'context_processors': [
+                'django.template.context_processors.request',
+                'django.contrib.auth.context_processors.auth',
+                'django.contrib.messages.context_processors.messages',
+            ],
+        },
+    },
+]
+
+WSGI_APPLICATION = 'PiatInventory.wsgi.application'
+
+
+# Database
+# https://docs.djangoproject.com/en/5.2/ref/settings/#databases
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
+}
+
+
+# Password validation
+# https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
+
+AUTH_PASSWORD_VALIDATORS = [
+    {
+        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+    },
+]
+
+
+# Internationalization
+# https://docs.djangoproject.com/en/5.2/topics/i18n/
+
+LANGUAGE_CODE = 'en-us'
+
+TIME_ZONE = 'UTC'
+
+USE_I18N = True
+
+USE_TZ = True
+
+
+# Static files (CSS, JavaScript, Images)
+# https://docs.djangoproject.com/en/5.2/howto/static-files/
+
+STATIC_URL = '/static/'
+
+# Default primary key field type
+# https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
+
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+===== ./PiatInventory/asgi.py =====
+"""
+ASGI config for PiatInventory project.
+
+It exposes the ASGI callable as a module-level variable named ``application``.
+
+For more information on this file, see
+https://docs.djangoproject.com/en/5.2/howto/deployment/asgi/
+"""
+
+import os
+
+from django.core.asgi import get_asgi_application
+
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'PiatInventory.settings')
+
+application = get_asgi_application()
+
+
+===== ./PiatInventory/__init__.py =====
+
+
+===== ./manage.py =====
+#!/usr/bin/env python
+"""Django's command-line utility for administrative tasks."""
+import os
+import sys
+
+
+def main():
+    """Run administrative tasks."""
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'PiatInventory.settings')
+    try:
+        from django.core.management import execute_from_command_line
+    except ImportError as exc:
+        raise ImportError(
+            "Couldn't import Django. Are you sure it's installed and "
+            "available on your PYTHONPATH environment variable? Did you "
+            "forget to activate a virtual environment?"
+        ) from exc
+    execute_from_command_line(sys.argv)
+
+
+if __name__ == '__main__':
+    main()
+
+

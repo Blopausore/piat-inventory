@@ -4,8 +4,8 @@ from django.utils import timezone
 import pandas as pd
 
 from core.common.models import Currency
-from core.common.mappings.unit import UNIT_MAPPING
-from core.common.mappings.choices import CURRENCY_MAPPING
+from core.common.mappings.units import UNIT_MAPPING
+from core.common.mappings.currency import CURRENCY_MAPPING
 
 def parse_int(value): 
     
@@ -53,7 +53,7 @@ def parse_decimal(value, default=Decimal('0.0')):
         if isinstance(value, str):
             value = ''.join(c for c in value if (c.isdigit() or c in '.-'))  # keep only digits, dot, minus
         elif isinstance(value, float):
-            value = round(value, ndigits=5)
+            value = str(round(value, ndigits=5))
         return Decimal(value)
     except (InvalidOperation, ValueError):
         return default

@@ -1,3 +1,5 @@
+output=all_python_files.txt
+rm -f "$output"
 find . \
   -type f \
   -name '*.py' \
@@ -8,3 +10,5 @@ find . \
     cat "$file"           >> "$output"
     echo -e "\n"         >> "$output"
   done
+
+

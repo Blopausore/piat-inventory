@@ -1,5 +1,5 @@
 
-from core.supplier_order.services.imports import import_supplier_orders
+from core.supplier_order.services.old_imports import import_supplier_orders
 from core.common.views.import_ import orders_import_upload
 
 def supplier_orders_import_upload(request):

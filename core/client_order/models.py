@@ -1,11 +1,7 @@
 from django.db import models
 from django.core.exceptions import ValidationError
 
-class Client(models.Model):
-    name = models.CharField(max_length=255)
-
-class Supplier(models.Model):
-    name = models.CharField(max_length=255)
+from core.common.models import Client
 
 class ClientOrder(models.Model):
     """An Order made by a client.

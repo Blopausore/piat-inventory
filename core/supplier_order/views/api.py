@@ -3,8 +3,8 @@ from django.views.decorators.csrf import csrf_exempt
 
 from core.supplier_order.mapping import SUPPLIER_ORDER_FIELDS
 from core.supplier_order.models import SupplierOrder
-from core.common.views.wrapper_order.api.json import orders_json
-from core.common.views.wrapper_order.api.update import order_update
+from core.common.views.api.json import orders_json
+from core.common.views.api.update import order_update
 
     
 def supplier_orders_json(request):

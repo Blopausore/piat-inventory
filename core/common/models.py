@@ -10,6 +10,6 @@ class Supplier(models.Model):
 class Currency(models.TextChoices):
     USD = 'USD', 'USD' 
     THB = 'THB', 'BHT'
-    # EUR = 'EUR', 'Euro'
+    EUR = 'EUR', 'Euro'
     # GBP = 'GBP', 'British Pound'
     # JPY = 'JPY', 'Japanese Yen'

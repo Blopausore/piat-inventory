@@ -1,8 +1,10 @@
 # core/services/supplier_order_raw_import.py
-
 import pandas as pd
 import numpy as np
+import numbers
+
 from django.db import transaction
+
 from core.order_raw.models import OrderRaw, SupplierOrderRaw, ClientOrderRaw
 
 class OrderRawImportService:
@@ -27,11 +29,31 @@ class OrderRawImportService:
         return str(v)
         
     def _has_meaningful_data(self, payload: dict) -> bool:
+        """
+        Renvoie True si au moins un champ a une valeur non vide et non nulle.
+        Les chaînes '0' et '0.0' sont traitées comme équivalentes à 0.
+        """
         for v in payload.values():
-            if v not in (None, "", 0, 0.0):
+            # None ou chaîne vide
+            if v is None or (isinstance(v, str) and v == ""):
+                continue
+            # Chaîne convertible en nombre
+            if isinstance(v, str):
+                try:
+                    if float(v) == 0:
+                        continue
+                    return True
+                except ValueError:
+                    # Non convertible → texte non vide ⇒ significatif
+                    return True
+            # Nombre Python (int, float, numpy scalar…)
+            if isinstance(v, numbers.Number):
+                if v == 0:
+                    continue
                 return True
+            # Tout autre type (ex: datetime serialisé) → significatif
+            return True
         return False
-
     
     def run(self) -> dict:
         report = {'imported': 0, 'skipped': 0, 'failed': []}
