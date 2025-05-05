@@ -1,8 +1,8 @@
 from django.urls import path
-from core.views.supplier_order.api import *
-from core.views.supplier_order.export import *
-from core.views.supplier_order.import_ import *
-from core.views.supplier_order.views import *
+from core.supplier_order.views.api import *
+from core.supplier_order.views.export import *
+from core.supplier_order.views.import_ import *
+from core.supplier_order.views.views import *
  
 urlpatterns = [
     path('supplier-orders/', supplier_orders_list, name='supplier_orders_list'),

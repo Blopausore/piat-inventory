@@ -1,11 +1,12 @@
 from django.contrib import admin
-from core.models.order_raw import SupplierOrderRaw
-from core.models.supplier_order import SupplierOrder
-from core.models.client_order import ClientOrder
+from core.order_raw.models import SupplierOrderRaw
+from core.supplier_order.models import SupplierOrder
+from core.client_order.models import ClientOrder
 
 
 admin.site.register(SupplierOrderRaw)
 
+admin.site.register(SupplierOrder)
 # @admin.register(SupplierOrder)
 # class SupplierOrderAdmin(admin.ModelAdmin):
 #     list_display = (

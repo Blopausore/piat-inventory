@@ -1,7 +1,7 @@
 import unittest
 from decimal import Decimal
 from django.test import TestCase
-from core.tools.parse import parse_unit
+from core.common.tools.parse import parse_unit
 from core.services.tools.order_pricing import MissingPriceFiller
 from core.models.supplier_order import SupplierOrder
 from django.utils import timezone
