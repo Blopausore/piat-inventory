@@ -1,10 +1,10 @@
 from django.contrib import admin
-from core.order_raw.models import SupplierOrderRaw
+from core.order_raw.models import OrderRaw
 from core.supplier_order.models import SupplierOrder
 from core.client_order.models import ClientOrder
 
 
-admin.site.register(SupplierOrderRaw)
+admin.site.register(OrderRaw)
 
 admin.site.register(SupplierOrder)
 # @admin.register(SupplierOrder)

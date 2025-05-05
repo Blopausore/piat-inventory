@@ -3,7 +3,7 @@
 import pandas as pd
 import numpy as np
 from django.db import transaction
-from core.models.order_raw import OrderRaw, SupplierOrderRaw, ClientOrderRaw
+from core.order_raw.models import OrderRaw, SupplierOrderRaw, ClientOrderRaw
 
 class OrderRawImportService:
     """
