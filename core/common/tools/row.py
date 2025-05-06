@@ -4,7 +4,6 @@ def get_value_mapped(row, field_name, mapping):
     possible_columns = mapping.get(field_name, [])
     for col in possible_columns:
         if col in row:
-            
             if type(row[col]) in {int, float} and pd.isna(row[col]):
                 return None
             return row[col]

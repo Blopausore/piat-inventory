@@ -1,4 +1,3 @@
-# core/services/transforms/filters/base.py
 from abc import ABC, abstractmethod
 from core.common.services.filters.context import TransformContext
 

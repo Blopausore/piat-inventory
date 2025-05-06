@@ -1,5 +1,3 @@
-# core/management/commands/import_supplier_orders.py
-
 from django.core.management.base import BaseCommand
 from core.order_raw.models import OrderRaw, SupplierOrderRaw, ClientOrderRaw
 

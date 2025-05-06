@@ -1,8 +1,7 @@
-# core/services/supplier_order_raw_import.py
 import pandas as pd
 import numpy as np
 import numbers
-
+from datetime import date, datetime
 from django.db import transaction
 
 from core.order_raw.models import OrderRaw, SupplierOrderRaw, ClientOrderRaw
@@ -24,36 +23,33 @@ class OrderRawImportService:
     def _serialize_value(self, v):
         if pd.isna(v):
             return ""
-        if isinstance(v, pd.Timestamp):
-            return v.to_pydatetime().isoformat()
         return str(v)
         
-    def _has_meaningful_data(self, payload: dict) -> bool:
+    def _has_meaningful_data(self, payload: dict, N=3) -> bool:
         """
-        Renvoie True si au moins un champ a une valeur non vide et non nulle.
-        Les chaînes '0' et '0.0' sont traitées comme équivalentes à 0.
+        Check if a row have at least 'N' valuable information. (not empty and not None, null, NaN or 0, .0)
         """
+        n = 0
         for v in payload.values():
-            # None ou chaîne vide
             if v is None or (isinstance(v, str) and v == ""):
                 continue
-            # Chaîne convertible en nombre
             if isinstance(v, str):
                 try:
                     if float(v) == 0:
                         continue
-                    return True
+                    if len(v) < 2:
+                        continue
+                    n+=1
                 except ValueError:
-                    # Non convertible → texte non vide ⇒ significatif
-                    return True
-            # Nombre Python (int, float, numpy scalar…)
+                    n+=1
             if isinstance(v, numbers.Number):
                 if v == 0:
                     continue
+                n+=1
+            if n >=N:
                 return True
-            # Tout autre type (ex: datetime serialisé) → significatif
-            return True
         return False
+    
     
     def run(self) -> dict:
         report = {'imported': 0, 'skipped': 0, 'failed': []}

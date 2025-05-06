@@ -16,13 +16,15 @@ class OrderRawImportServiceTests(TestCase):
         # Create a temporary Excel file with two sheets
         self.tmpfile = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
         df1 = pd.DataFrame([
-            {"A": np.nan, "B": None},
-            {"A": 1,     "B": "foo"},
+            {"A": np.nan, "B": None}, # Invalid
+            {"A": 1,     "B": "foo"}, # Invalid
         ])
         df2 = pd.DataFrame([
-            {"X": 0, "Y": 0.0, "Z": ""},   
-            {"X": 5, "Y": 3.14, "Z": "bar"},
+            {"X": 5.01, "Y": 3.14, "Z": "bar"}, # Valid
+            {"X": 5.02, "Y": 3.14, "Z": "bar"}, # Valid
         ])
+        # 2 valid | 2 skipped
+        
         with pd.ExcelWriter(self.tmpfile.name, engine="openpyxl") as writer:
             df1.to_excel(writer, sheet_name="Sheet1", index=False)
             df2.to_excel(writer, sheet_name="Sheet2", index=False)
@@ -35,10 +37,7 @@ class OrderRawImportServiceTests(TestCase):
         svc = OrderRawImportService(self.tmpfile.name, order_type="supplier")
         # NaN -> empty
         self.assertEqual(svc._serialize_value(np.nan), "")
-        # Timestamp -> ISO string
-        ts = pd.Timestamp("2025-05-02T13:45:00")
-        iso = svc._serialize_value(ts)
-        self.assertTrue(isinstance(iso, str) and iso.startswith("2025-05-02T13:45"))
+        
         # Numeric types -> str
         self.assertEqual(svc._serialize_value(np.int64(7)), "7")
         self.assertEqual(svc._serialize_value("abc"), "abc")
@@ -47,9 +46,10 @@ class OrderRawImportServiceTests(TestCase):
     def test_has_meaningful_data(self):
         svc = OrderRawImportService(self.tmpfile.name, order_type="client")
         # All empty or zeros -> False
-        self.assertFalse(svc._has_meaningful_data({"a": None, "b": "", "c": 0, "d": 0.0}))
+        self.assertFalse(svc._has_meaningful_data({"a": None, "b": "1", "c": 0, "d": 0.0}))
         # One non-zero -> True
-        self.assertTrue(svc._has_meaningful_data({"a": None, "b": "", "c": 1, "d": 0.0}))
+        self.assertTrue(svc._has_meaningful_data({"a": "SomeOneReallyImportant", "b": "HaveOrder", "c": "SOMETHING", "d": 0.0}))
+        self.assertTrue(svc._has_meaningful_data({"a": "SomeOneReallyImportant", "b": "1", "c": "1", "d": 0.0}, N=1))
 
     def test_run_supplier_import(self):
         svc = OrderRawImportService(self.tmpfile.name, order_type="supplier")

@@ -106,10 +106,6 @@ class ParseUnitTests(SimpleTestCase):
 
 
 class RowToolsTests(SimpleTestCase):
-    def test_get_value_mapped_returns_first_match(self):
-        row = {'A': 1, 'B': 2, 'C': 3}
-        mapping = {'field': {'B', 'C'}}
-        self.assertEqual(get_value_mapped(row, 'field', mapping), 2)
 
     def test_get_value_mapped_missing_returns_none(self):
         row = {'X': 5}

@@ -18,7 +18,6 @@ class Command(BaseCommand):
             help="Size of the flunch (higher is quicker but use more memory)."
         )
 
-
     def handle(self, *args, **kwargs):
         transformer = SupplierOrderTransformer(dry_run=kwargs["dry_run"])
         qs = SupplierOrderRaw.objects.filter(interpreted__isnull=True)
@@ -30,8 +29,9 @@ class Command(BaseCommand):
                 f"  orders created : {stats['orders_created']}\n"
                 f"  raws errors : {stats['raws_failed']}"
             ))
+            errors = list(sorted(stats['errors'].values(), key= lambda e: e[1], reverse=True))
             self.stdout.write(self.style.ERROR("First 10 samples of errors\n"))
-            for _, error in zip(range(10), stats['errors'].values()):
+            for _, error in zip(range(10), errors):
                 self.stdout.write(self.style.ERROR(f"{error[1]} of {error[0]}\n"))
 
         else:
@@ -41,7 +41,8 @@ class Command(BaseCommand):
                 f"  orders created : {stats['orders_created']}\n"
                 f"  raws errors : {stats['raws_failed']}"
             ))
-            self.stdout.write(self.style.ERROR("First 10 samples of errors\n"))
-            for _, error in zip(range(10), stats['errors'].values()):
-                self.stdout.write(self.style.ERROR(f"{error[1]} of {error[0]}\n"))
+            errors = list(sorted(stats['errors'].values(), key= lambda e: e[1], reverse=True))
+            self.stdout.write(self.style.WARNING("First 10 samples of errors\n"))
+            for _, error in zip(range(10), errors):
+                self.stdout.write(self.style.WARNING(f"{error[1]} of {error[0]}\n"))
 

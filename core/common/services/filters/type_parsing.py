@@ -1,4 +1,3 @@
-# core/services/filters/type_parsing.py
 from decimal import Decimal, ROUND_HALF_UP
 import re
 
@@ -10,8 +9,9 @@ from core.common.tools.parse import (
 
 def to_decimal(cleaned: str, field: models.DecimalField) -> Decimal:
     """Nettoie, convertit et quantize selon field.decimal_places."""
-    # on enlève tout sauf chiffres, point et signe
     s = re.sub(r"[^\d\.\-]", "", cleaned)
+    if s == "":
+        raise ValueError(f"Decimal Field contains no number : {cleaned}")
     dec = Decimal(s or "0")
     quantum = Decimal("1").scaleb(-field.decimal_places)
     

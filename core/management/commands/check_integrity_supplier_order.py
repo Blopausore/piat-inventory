@@ -1,4 +1,3 @@
-# core/management/commands/check_data_integrity.py
 
 import json
 from datetime import date

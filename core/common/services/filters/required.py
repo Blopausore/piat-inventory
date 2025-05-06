@@ -1,10 +1,8 @@
-# core/services/filters/validity.py
 import pandas as pd
 from django.db.models import Field
 from core.common.services.filters.base import BaseTransformFilter
-from core.common.tools.row import is_duplicate_object, is_fully_invalid_row
 
-class SupplierValidityFilter(BaseTransformFilter):
+class RequiredFieldFilter(BaseTransformFilter):
     
     def apply(self, ctx):
         missing = []
@@ -23,6 +21,6 @@ class SupplierValidityFilter(BaseTransformFilter):
                 if val in (None, ''):
                     missing.append(f.name)
         if missing:
-            ctx.error = f"Required field missing : {', '.join(missing)}"
+            ctx.error = f"Required field missing : {', '.join(sorted(missing))}"
             return False
         return True

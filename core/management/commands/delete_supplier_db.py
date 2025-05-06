@@ -1,5 +1,3 @@
-# core/management/commands/delete_supplier_db.py
-
 from django.core.management.base import BaseCommand
 from core.supplier_order.models import SupplierOrder
 

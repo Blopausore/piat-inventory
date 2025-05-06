@@ -1,4 +1,3 @@
-# core/mappings/supplier_order.py
 
 SUPPLIER_ORDER_FIELDS = [
     ("date", "Date"),
@@ -29,7 +28,7 @@ SUPPLIER_ORDER_FIELDS = [
 
 
 RAW_SUPPLIER_COLUMN_MAPPING = {
-    'client_memo':          ['Client Memo', 'Purchase (P) Memo (M) Bargain (B)'],
+    'client_memo':          ['Client Memo', 'Purchase (P) Memo (M) Bargain (B)', 'Purchase(P)\nMemo (M)\nBargain (B)'],
     'date':                 ['Date'],
     'book_no':              ['Book No.', 'Book No'],
     'order_no':             ['No.', 'Order No', 'No'],
@@ -69,7 +68,7 @@ SUPPLIER_COLUMN_MAPPING = {
     'size':                 ['Size', 'Dimensions'],
     'carats':               ['Carats', 'Weight (ct)'],
     'weight_per_piece':     ['Weight per piece', 'Weight/Piece'],
-    'price_usd_per_ct':     ['price $/ct ', 'Price $/ct', 'Price per ct $'],
+    'price_usd_per_ct':     ['price $/ct ', 'Price $/ct', 'Price per ct $', 'price/$ '],
     'price_usd_per_piece':  ['price/$ per piece', 'Price/$ per Piece'],
     'total_usd':            ['Total $', 'USD Total'],
 }

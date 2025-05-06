@@ -7,19 +7,27 @@ from core.common.models import Currency
 from core.common.mappings.units import UNIT_MAPPING
 from core.common.mappings.currency import CURRENCY_MAPPING
 
-def parse_int(value): 
+# def parse_int(value): 
     
+#     if isinstance(value, str):
+#         value = ''.join(d for d in value if d.isdigit())
+#         if value == '':
+#             return None
+#     return int(value)
+
+def parse_int(value):
     if isinstance(value, str):
-        value = ''.join(d for d in value if d.isdigit())
-        if value == '':
-            return None
+        try:
+            return int(float(value))
+        except ValueError:
+            digits = ''.join(ch for ch in value if ch.isdigit())
+            return int(digits) if digits else None
     return int(value)
 
 def parse_date(value, expected_year=None):
     """Safely parse a date value and make it timezone-aware if needed."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
-
     # Special handling if the value is a float (Excel day number)
     if isinstance(value, (float, int)):
         parsed = pd.to_datetime(value, origin='1899-12-30', unit='D', errors='coerce')
@@ -27,7 +35,7 @@ def parse_date(value, expected_year=None):
         parsed = pd.to_datetime(value, errors='coerce')
 
     if pd.isna(parsed):
-        return None
+        raise ValueError(f"Invalid date format '{value}'. ")
 
     # Convert pandas Timestamp to native Python datetime
     if isinstance(parsed, pd.Timestamp):
@@ -57,7 +65,6 @@ def parse_decimal(value, default=Decimal('0.0')):
         return Decimal(value)
     except (InvalidOperation, ValueError):
         return default
-
 
 def parse_currency(raw: str) -> Currency:
     """

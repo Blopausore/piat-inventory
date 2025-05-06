@@ -1,4 +1,3 @@
-# core/services/filters/context.py
 from django.db.models import Field
 
 class TransformContext:
@@ -21,6 +20,7 @@ class TransformContext:
     @property
     def model_class(self):
         return self._model_class
+    
     
     def instantiate_order(self):
         self._attrs['raw'] = self.raw

@@ -1,5 +1,3 @@
-# core/mappings/units.py
-
 UNIT_MAPPING = {
     # carat
     'CT': {'CT', 'Ct', 'ct'},

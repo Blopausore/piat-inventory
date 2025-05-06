@@ -1,4 +1,4 @@
-===== ./core/urls.py =====
+===== /home/smaug/piat/piat-tools/core/urls.py =====
 from django.urls import path
 from core.supplier_order.views.api import *
 from core.supplier_order.views.export import *
@@ -17,10 +17,7 @@ urlpatterns = [
     
 ]
 
-
-===== ./core/common/mappings/units.py =====
-# core/mappings/units.py
-
+===== /home/smaug/piat/piat-tools/core/common/mappings/units.py =====
 UNIT_MAPPING = {
     # carat
     'CT': {'CT', 'Ct', 'ct'},
@@ -34,8 +31,7 @@ UNIT_MAPPING = {
     'TOTAL': {'T', 'TOTAL', 'total', 'lot'},
 }
 
-
-===== ./core/common/mappings/currency.py =====
+===== /home/smaug/piat/piat-tools/core/common/mappings/currency.py =====
 CANONICAL = {'USD', 'THB', 'EUR', 'GBP', 'JPY'}
 
 
@@ -48,11 +44,88 @@ CURRENCY_MAPPING = {
 
 
 
+===== /home/smaug/piat/piat-tools/core/common/mappings/__init__.py =====
 
-===== ./core/common/mappings/__init__.py =====
+===== /home/smaug/piat/piat-tools/core/common/services/transform.py =====
+from django.db.models import F
+from django.db import transaction
+
+from core.common.services.filters.mapping import FieldMappingFilter
+from core.common.services.filters.type_parsing import TypeParsingFilter
+from core.common.services.filters.context import TransformContext
+from core.common.services.filters.canceled import CanceledFieldFilter
+from core.common.services.filters.required import RequiredFieldFilter
+
+from core.supplier_order.mapping import SUPPLIER_COLUMN_MAPPING, RAW_SUPPLIER_COLUMN_MAPPING
 
 
-===== ./core/common/services/exports/to_excel.py =====
+class OrderTransformer:
+    def __init__(self, order_model, dry_run=False):
+        self.dry_run = dry_run
+        # mapping → parsing → validité
+        self.filters = [
+            FieldMappingFilter(field_mapping=RAW_SUPPLIER_COLUMN_MAPPING),
+            FieldMappingFilter(field_mapping=SUPPLIER_COLUMN_MAPPING),
+            TypeParsingFilter(order_model=order_model),
+            CanceledFieldFilter(),
+            RequiredFieldFilter(),
+        ]
+
+    def transform_one(self, raw):
+        
+        ctx = TransformContext(raw, self.order_model)
+        
+        try:
+            for filt in self.filters:
+                
+                if not filt.apply(ctx):
+                    raise ValueError(f"{ctx.error} from {filt}")
+            
+            ctx.instantiate_order()
+            ctx.order.full_clean()
+            
+        except Exception as e:
+            ctx.error = str(e)
+            return ctx
+            
+        return ctx
+
+
+    def run(self, queryset=None, batch_size=1000):
+        orders_to_create = []
+        stats = {'total_raws': 0, 'orders_created': 0, 'raws_failed': 0, 'errors': {}}
+        key = {} # hash key to check doublon
+        for raw in queryset.iterator():
+            stats['total_raws'] += 1
+            ctx = self.transform_one(raw)
+
+            if ctx.error is None:
+                orders_to_create.append(ctx.order)
+                stats['orders_created'] += 1
+            else:
+                stats['raws_failed'] += 1
+                error_key = ctx.error[:40]
+                if not error_key in stats['errors'].keys():
+                    print(ctx.error)
+                    stats['errors'][error_key] = [f"{ctx.raw.sheet_name} - {ctx.raw.row_index} : {ctx.error}", 1]
+                else:
+                    stats['errors'][error_key][1] +=1
+
+            if len(orders_to_create) >= batch_size:
+                if not self.dry_run:
+                    with transaction.atomic():
+                        self.order_model.objects.bulk_create(
+                            orders_to_create, batch_size
+                        )
+                orders_to_create.clear()
+
+        if not self.dry_run and orders_to_create:
+            with transaction.atomic():
+                self.order_model.objects.bulk_create(
+                        orders_to_create, batch_size
+                    )
+        return stats
+===== /home/smaug/piat/piat-tools/core/common/services/exports/to_excel.py =====
 import openpyxl
 from openpyxl.utils import get_column_letter
 from django.http import HttpResponse
@@ -92,11 +165,57 @@ def export_orders_to_excel(queryset, filename="orders.xlsx", columns=None, field
 
     return response
 
+===== /home/smaug/piat/piat-tools/core/common/services/exports/__init__.py =====
 
-===== ./core/common/services/exports/__init__.py =====
+===== /home/smaug/piat/piat-tools/core/common/services/filters/canceled.py =====
+import re
+import pandas as pd
+from django.db.models import Field
+from core.common.services.filters.base import BaseTransformFilter
 
+class CanceledFieldFilter(BaseTransformFilter):
+    """ Filter row that contains a 'canceled' key word in it.
+    """
+    def apply(self, ctx):                
+        for key,val in ctx.raw.data.items():
+            if val == "":
+                continue
+            val = val.lower()
+            val = re.sub('[^a-z]',"", val)
+            if val in {'canceled', 'cancel', 'cancelled'}:
+                ctx.error = f"Row canceled in {key} : {val}"
+                return False
+        return True
+    
+    
+===== /home/smaug/piat/piat-tools/core/common/services/filters/required.py =====
+import pandas as pd
+from django.db.models import Field
+from core.common.services.filters.base import BaseTransformFilter
 
-===== ./core/common/services/filters/mapping.py =====
+class RequiredFieldFilter(BaseTransformFilter):
+    
+    def apply(self, ctx):
+        missing = []
+        if all(pd.isna(value) for value in ctx.attrs.values()):
+            ctx.error = f"Row is empty"
+            return False
+        
+        # Check required field
+        for f in ctx.model_class._meta.get_fields():
+            if not isinstance(f, Field) or not f.concrete or f.auto_created:
+                continue
+            if f.name == 'raw':
+                continue
+            if not getattr(f, 'null', False) and not getattr(f, 'blank', False):
+                val = ctx.attrs.get(f.name)
+                if val in (None, ''):
+                    missing.append(f.name)
+        if missing:
+            ctx.error = f"Required field missing : {', '.join(sorted(missing))}"
+            return False
+        return True
+===== /home/smaug/piat/piat-tools/core/common/services/filters/mapping.py =====
 from .base import BaseTransformFilter
 
 from core.common.tools.row import get_value_mapped
@@ -114,12 +233,18 @@ class FieldMappingFilter(BaseTransformFilter):
 
 class ValueMappingFilter(BaseTransformFilter):
     # TODO : mapping of 
+    
+    
+    def map_order_number(self, value):
+        if value is None:
+            ...
+        
+    
+    
     def apply(self, ctx):
         return super().apply(ctx)
     
-
-===== ./core/common/services/filters/type_parsing.py =====
-# core/services/filters/type_parsing.py
+===== /home/smaug/piat/piat-tools/core/common/services/filters/type_parsing.py =====
 from decimal import Decimal, ROUND_HALF_UP
 import re
 
@@ -131,7 +256,6 @@ from core.common.tools.parse import (
 
 def to_decimal(cleaned: str, field: models.DecimalField) -> Decimal:
     """Nettoie, convertit et quantize selon field.decimal_places."""
-    # on enlève tout sauf chiffres, point et signe
     s = re.sub(r"[^\d\.\-]", "", cleaned)
     dec = Decimal(s or "0")
     quantum = Decimal("1").scaleb(-field.decimal_places)
@@ -172,9 +296,7 @@ class TypeParsingFilter(BaseTransformFilter):
             else:
                 ctx.attrs[field_name] = raw_val
         return True
-
-===== ./core/common/services/filters/fill_price.py =====
-# core/services/transforms/filters/type_parsing.py
+===== /home/smaug/piat/piat-tools/core/common/services/filters/fill_price.py =====
 
 from django.db import models
 from core.common.tools.parse import (
@@ -213,9 +335,7 @@ class TypeParsingFilter(BaseTransformFilter):
             else:
                 ctx.attrs[field_name] = raw_val
 
-
-===== ./core/common/services/filters/context.py =====
-# core/services/filters/context.py
+===== /home/smaug/piat/piat-tools/core/common/services/filters/context.py =====
 from django.db.models import Field
 
 class TransformContext:
@@ -239,46 +359,27 @@ class TransformContext:
     def model_class(self):
         return self._model_class
     
+    
     def instantiate_order(self):
         self._attrs['raw'] = self.raw
         self.order = self.model_class(**self.attrs)
 
-
-===== ./core/common/services/filters/__init__.py =====
-
-
-===== ./core/common/services/filters/validity.py =====
-# core/services/filters/validity.py
+===== /home/smaug/piat/piat-tools/core/common/services/filters/value.py =====
+import re
 import pandas as pd
 from django.db.models import Field
 from core.common.services.filters.base import BaseTransformFilter
-from core.common.tools.row import is_duplicate_object, is_fully_invalid_row
 
-class SupplierValidityFilter(BaseTransformFilter):
+class ValueFieldFilter(BaseTransformFilter):
+    """ Filter row a certain value.
     
-    def apply(self, ctx):
-        missing = []
-        if all(pd.isna(value) for value in ctx.attrs.values()):
-            ctx.error = f"Row is empty"
-            return False
-        
-        # Check required field
-        for f in ctx.model_class._meta.get_fields():
-            if not isinstance(f, Field) or not f.concrete or f.auto_created:
-                continue
-            if f.name == 'raw':
-                continue
-            if not getattr(f, 'null', False) and not getattr(f, 'blank', False):
-                val = ctx.attrs.get(f.name)
-                if val in (None, ''):
-                    missing.append(f.name)
-        if missing:
-            ctx.error = f"Required field missing : {', '.join(missing)}"
-            return False
-        return True
+    :args::
+     field_name (str) : The field
+    """
+    ...
+===== /home/smaug/piat/piat-tools/core/common/services/filters/__init__.py =====
 
-===== ./core/common/services/filters/base.py =====
-# core/services/transforms/filters/base.py
+===== /home/smaug/piat/piat-tools/core/common/services/filters/base.py =====
 from abc import ABC, abstractmethod
 from core.common.services.filters.context import TransformContext
 
@@ -294,11 +395,9 @@ class BaseTransformFilter(ABC):
     def apply(self, ctx: TransformContext) -> bool:
         pass
 
+===== /home/smaug/piat/piat-tools/core/common/services/__init__.py =====
 
-===== ./core/common/services/__init__.py =====
-
-
-===== ./core/common/models.py =====
+===== /home/smaug/piat/piat-tools/core/common/models.py =====
 from django.db import models
 from django.core.exceptions import ValidationError
 
@@ -311,13 +410,11 @@ class Supplier(models.Model):
 class Currency(models.TextChoices):
     USD = 'USD', 'USD' 
     THB = 'THB', 'BHT'
-    # EUR = 'EUR', 'Euro'
+    EUR = 'EUR', 'Euro'
     # GBP = 'GBP', 'British Pound'
     # JPY = 'JPY', 'Japanese Yen'
 
-
-===== ./core/common/views/api/json.py =====
-# core/views/wrapper_order/api.py
+===== /home/smaug/piat/piat-tools/core/common/views/api/json.py =====
 
 from django.core.paginator import Paginator
 from django.db.models import Q
@@ -427,8 +524,7 @@ def orders_json(
         "data": data,
     })
 
-
-===== ./core/common/views/api/update.py =====
+===== /home/smaug/piat/piat-tools/core/common/views/api/update.py =====
 
 from django.http import JsonResponse 
 from django.views.decorators.csrf import csrf_exempt
@@ -464,13 +560,11 @@ def order_update(request, order_model, order_fields):
 
 
 
-
-===== ./core/common/views/api/__init__.py =====
+===== /home/smaug/piat/piat-tools/core/common/views/api/__init__.py =====
 from .json import orders_json
 from .update import order_update
 
-
-===== ./core/common/views/export.py =====
+===== /home/smaug/piat/piat-tools/core/common/views/export.py =====
 from datetime import datetime
 import pandas as pd
 
@@ -509,8 +603,7 @@ def orders_export(request, order_model, order_fields, order_name):
 
     return response
 
-
-===== ./core/common/views/import_.py =====
+===== /home/smaug/piat/piat-tools/core/common/views/import_.py =====
 from django.contrib import messages
 from django.shortcuts import redirect
 
@@ -531,32 +624,38 @@ def orders_import_upload(request, import_order_func, order_name):
         return redirect(f'{order_name}_orders_import_page')
     
 
-
-===== ./core/common/views/__init__.py =====
+===== /home/smaug/piat/piat-tools/core/common/views/__init__.py =====
 from .api import orders_json, order_update
 from .export import orders_export
 from .import_ import orders_import_upload
 
+===== /home/smaug/piat/piat-tools/core/common/tools/__init__.py =====
 
-===== ./core/common/tools/__init__.py =====
-
-
-===== ./core/common/tools/parse.py =====
+===== /home/smaug/piat/piat-tools/core/common/tools/parse.py =====
 import math
 from decimal import Decimal, InvalidOperation
 from django.utils import timezone
 import pandas as pd
 
 from core.common.models import Currency
-from core.common.mappings.unit import UNIT_MAPPING
-from core.common.mappings.choices import CURRENCY_MAPPING
+from core.common.mappings.units import UNIT_MAPPING
+from core.common.mappings.currency import CURRENCY_MAPPING
 
-def parse_int(value): 
+# def parse_int(value): 
     
+#     if isinstance(value, str):
+#         value = ''.join(d for d in value if d.isdigit())
+#         if value == '':
+#             return None
+#     return int(value)
+
+def parse_int(value):
     if isinstance(value, str):
-        value = ''.join(d for d in value if d.isdigit())
-        if value == '':
-            return None
+        try:
+            return int(float(value))
+        except ValueError:
+            digits = ''.join(ch for ch in value if ch.isdigit())
+            return int(digits) if digits else None
     return int(value)
 
 def parse_date(value, expected_year=None):
@@ -571,7 +670,7 @@ def parse_date(value, expected_year=None):
         parsed = pd.to_datetime(value, errors='coerce')
 
     if pd.isna(parsed):
-        return None
+        raise ValueError(f"Invalid date format '{value}'. ")
 
     # Convert pandas Timestamp to native Python datetime
     if isinstance(parsed, pd.Timestamp):
@@ -597,7 +696,7 @@ def parse_decimal(value, default=Decimal('0.0')):
         if isinstance(value, str):
             value = ''.join(c for c in value if (c.isdigit() or c in '.-'))  # keep only digits, dot, minus
         elif isinstance(value, float):
-            value = round(value, ndigits=5)
+            value = str(round(value, ndigits=5))
         return Decimal(value)
     except (InvalidOperation, ValueError):
         return default
@@ -639,15 +738,13 @@ def parse_unit(raw: str) -> str:
 
     raise ValueError(f"Unknown unit: '{raw}'")
 
-
-===== ./core/common/tools/row.py =====
+===== /home/smaug/piat/piat-tools/core/common/tools/row.py =====
 import pandas as pd
 
 def get_value_mapped(row, field_name, mapping):
     possible_columns = mapping.get(field_name, [])
     for col in possible_columns:
         if col in row:
-            
             if type(row[col]) in {int, float} and pd.isna(row[col]):
                 return None
             return row[col]
@@ -679,20 +776,144 @@ def is_duplicate_object(obj, fields=None):
 
     filter_kwargs = {field: getattr(obj, field) for field in fields}
     return obj.__class__.objects.filter(**filter_kwargs).exists()
+===== /home/smaug/piat/piat-tools/core/common/management/commands/__init__.py =====
 
-===== ./core/common/management/commands/__init__.py =====
+===== /home/smaug/piat/piat-tools/core/common/management/__init__.py =====
+
+===== /home/smaug/piat/piat-tools/core/common/__init__.py =====
+
+===== /home/smaug/piat/piat-tools/core/common/tests.py =====
+import unittest
+import pandas as pd
+import numpy as np
+from decimal import Decimal
+from datetime import datetime
+from django.test import SimpleTestCase
+from django.utils import timezone
+
+from core.common.tools.parse import (
+    parse_int, parse_decimal, parse_date, parse_currency, parse_unit
+)
+from core.common.tools.row import get_value_mapped, is_fully_invalid_row
+from core.common.models import Currency
 
 
-===== ./core/common/management/__init__.py =====
+class ParseIntTests(SimpleTestCase):
+    def test_simple_digits(self):
+        self.assertEqual(parse_int('42'), 42)
+
+    def test_mixed_characters(self):
+        self.assertEqual(parse_int('a1b2c3'), 123)
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(parse_int(''))
+
+    def test_no_digits_returns_none(self):
+        self.assertIsNone(parse_int('abc'))
 
 
-===== ./core/common/__init__.py =====
+class ParseDecimalTests(SimpleTestCase):
+    def test_string_input(self):
+        self.assertEqual(parse_decimal('1.234'), Decimal('1.234'))
+
+    def test_float_input(self):
+        self.assertEqual(parse_decimal(3.21), Decimal('3.21'))
+
+    def test_invalid_string_returns_default(self):
+        self.assertEqual(parse_decimal('abc'), Decimal('0.0'))
+
+    def test_none_returns_default(self):
+        self.assertEqual(parse_decimal(None), Decimal('0.0'))
 
 
-===== ./core/common/tests.py =====
+class ParseDateTests(SimpleTestCase):
+    def test_iso_string(self):
+        dt = parse_date('2025-05-05')
+        self.assertIsNotNone(dt)
+        self.assertEqual(dt.date(), datetime(2025, 5, 5).date())
+        self.assertTrue(timezone.is_aware(dt))
+
+    def test_timestamp_like_numeric(self):
+        # Excel float date for 2025-05-05: days since 1899-12-30 ~ 44100+?
+        # Use pandas Timestamp to simulate numeric handling
+        ts = pd.Timestamp('2025-05-05')
+        float_val = ts.to_pydatetime()
+        # parse_date should accept numeric timestamp gracefully
+        dt = parse_date(ts)
+        self.assertEqual(dt.date(), datetime(2025, 5, 5).date())
+
+    def test_none_returns_none(self):
+        self.assertIsNone(parse_date(None))
 
 
-===== ./core/tests/test_order_raw_import.py =====
+class ParseCurrencyTests(SimpleTestCase):
+    def test_canonical_code(self):
+        self.assertEqual(parse_currency('USD'), Currency.USD)
+
+    def test_lowercase_alias(self):
+        self.assertEqual(parse_currency('us$'), Currency.USD)
+
+    def test_symbol_alias(self):
+        self.assertEqual(parse_currency('$'), Currency.USD)
+
+    def test_euro_alias(self):
+        self.assertEqual(parse_currency('EURO'), Currency.EUR)
+
+    def test_unknown_raises(self):
+        with self.assertRaises(ValueError):
+            parse_currency('UNKNOWN')
+
+
+class ParseUnitTests(SimpleTestCase):
+    def test_carat_variants(self):
+        for raw in ['CT', 'Ct', 'ct']:
+            self.assertEqual(parse_unit(raw), 'CT')
+
+    def test_gram_variants(self):
+        for raw in ['G', 'Gram', 'g']:
+            self.assertEqual(parse_unit(raw), 'G')
+
+    def test_kg_variants(self):
+        for raw in ['KG', 'kg', 'Kg']:
+            self.assertEqual(parse_unit(raw), 'KG')
+
+    def test_piece_variants(self):
+        for raw in ['PC', 'Pc', 'pc', 'P']:
+            self.assertEqual(parse_unit(raw), 'PC')
+
+    def test_total_variants(self):
+        for raw in ['T', 'TOTAL', 'total', 'lot']:
+            self.assertEqual(parse_unit(raw), 'TOTAL')
+
+    def test_unknown_unit_raises(self):
+        with self.assertRaises(ValueError):
+            parse_unit('UNKNOWN_UNIT')
+
+
+class RowToolsTests(SimpleTestCase):
+    def test_get_value_mapped_returns_first_match(self):
+        row = {'A': 1, 'B': 2, 'C': 3}
+        mapping = {'field': {'B', 'C'}}
+        self.assertEqual(get_value_mapped(row, 'field', mapping), 2)
+
+    def test_get_value_mapped_missing_returns_none(self):
+        row = {'X': 5}
+        mapping = {'field': {'A', 'B'}}
+        self.assertIsNone(get_value_mapped(row, 'field', mapping))
+
+    def test_is_fully_invalid_all_na(self):
+        series = pd.Series({'x': np.nan, 'y': None})
+        self.assertTrue(is_fully_invalid_row(series))
+
+    def test_is_fully_invalid_false_if_one_valid(self):
+        series = pd.Series({'x': np.nan, 'y': 1})
+        self.assertFalse(is_fully_invalid_row(series))
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+===== /home/smaug/piat/piat-tools/core/tests/test_order_raw_import.py =====
 import os
 import tempfile
 from decimal import Decimal
@@ -764,8 +985,7 @@ class OrderRawImportServiceTest(TestCase):
         self.assertEqual(report["imported"], 2)
         self.assertEqual(OrderRaw.objects.count(), 2)
 
-
-===== ./core/tests/test_supplier_order.py =====
+===== /home/smaug/piat/piat-tools/core/tests/test_supplier_order.py =====
 import io
 import warnings
 
@@ -932,10 +1152,7 @@ class SupplierOrderTests(TestCase):
         # Only one new record should have been added
         final_count = SupplierOrder.objects.count()
         self.assertEqual(final_count, initial_count + 1)
-
-===== ./core/tests/test_filters.py =====
-# core/services/filters/tests/test_filters.py
-
+===== /home/smaug/piat/piat-tools/core/tests/test_filters.py =====
 from decimal import Decimal
 from datetime import datetime
 
@@ -946,7 +1163,7 @@ from django.test.utils import isolate_apps
 from core.services.filters.context import TransformContext
 from core.services.filters.mapping import FieldMappingFilter
 from core.services.filters.type_parsing import TypeParsingFilter
-from core.services.filters.validity import SupplierValidityFilter
+from core.services.filters.validity import RequiredFieldFilter
 from core.models.order_raw import OrderRaw
 
 @isolate_apps("core")
@@ -1041,7 +1258,7 @@ class TypeParsingFilterTest(SimpleTestCase):
         self.assertEqual(self.ctx.attrs['date'].date(), datetime(2025, 1, 1).date())
 
 @isolate_apps('core')
-class SupplierValidityFilterTest(SimpleTestCase):
+class RequiredFieldFilterTest(SimpleTestCase):
     
     @classmethod
     def setUpClass(cls):
@@ -1068,7 +1285,7 @@ class SupplierValidityFilterTest(SimpleTestCase):
     
     def setUp(self):
         self.ctx = TransformContext({}, self.TestModel)
-        self.filt = SupplierValidityFilter()
+        self.filt = RequiredFieldFilter()
 
     def test_missing_required_fields(self):
         ok = self.filt.apply(self.ctx)
@@ -1084,8 +1301,7 @@ class SupplierValidityFilterTest(SimpleTestCase):
         self.assertIsNone(self.ctx.error)
 
 
-
-===== ./core/tests/test_order_pricing.py =====
+===== /home/smaug/piat/piat-tools/core/tests/test_order_pricing.py =====
 from decimal import Decimal
 from datetime import date
 
@@ -1206,8 +1422,7 @@ class MissingPriceFillerTests(TestCase):
         self.assertEqual(err['order_id'], order.id)
         self.assertIn('No exchange rate available', err['error'])
 
-
-===== ./core/tests/test_price_filling.py =====
+===== /home/smaug/piat/piat-tools/core/tests/test_price_filling.py =====
 import unittest
 from decimal import Decimal
 from django.test import TestCase
@@ -1312,149 +1527,166 @@ class MissingPriceFillerTests(TestCase):
 if __name__ == '__main__':
     unittest.main()
 
+===== /home/smaug/piat/piat-tools/core/tests/__init__.py =====
 
-===== ./core/tests/__init__.py =====
-
-
-===== ./core/admin.py =====
+===== /home/smaug/piat/piat-tools/core/admin.py =====
 from django.contrib import admin
-from core.order_raw.models import OrderRaw
+from core.order_raw.models import OrderRaw, SupplierOrderRaw
 from core.supplier_order.models import SupplierOrder
 from core.client_order.models import ClientOrder
 
 
-admin.site.register(OrderRaw)
-
-admin.site.register(SupplierOrder)
-# @admin.register(SupplierOrder)
-# class SupplierOrderAdmin(admin.ModelAdmin):
-#     list_display = (
-#         'date', 'supplier', 'order_no', 'stone', 'shape', 'color',
-#         'carats', 'price_cur_per_unit', 'currency', 'total_thb'
-#     )
-#     search_fields = ('supplier', 'order_no', 'stone', 'color', 'shape', 'remarks')
-#     list_filter = ('currency', 'supplier', 'shape', 'color', 'unit')
-#     ordering = ('-date',)
-#     date_hierarchy = 'date'
-
-===== ./core/supplier_order/services/imports.py =====
+# admin.site.register(SupplierOrderRaw)
 
 
-===== ./core/supplier_order/services/transform.py =====
-# core/services/transforms/supplier_order_transform.py
-from django.db.models import F
+class InterpretedFilter(admin.SimpleListFilter):
+    title = 'Interpreted'
+    parameter_name = 'interpreted'
+
+    def lookups(self, request, model_admin):
+        return (
+            ('1', 'Yes'),
+            ('0', 'No'),
+        )
+
+    def queryset(self, request, queryset):
+        val = self.value()
+        if val == '1':
+            return queryset.filter(interpreted__isnull=False)
+        if val == '0':
+            return queryset.filter(interpreted__isnull=True)
+        return queryset
+
+@admin.register(SupplierOrderRaw)
+class SupplierOrderRawAdmin(admin.ModelAdmin):
+    list_display = (
+        'source_file',
+        'sheet_name',
+        'row_index',
+        'is_interpreted',
+    )
+    list_filter = (
+        'source_file',
+        'sheet_name',
+        InterpretedFilter,
+    )
+    search_fields = ('source_file', 'sheet_name', 'row_index')
+    ordering = ('source_file', 'sheet_name', 'row_index')
+
+    def is_interpreted(self, obj):
+        return hasattr(obj, 'interpreted') and obj.interpreted is not None
+    is_interpreted.boolean = True
+    is_interpreted.short_description = 'Interpreted'
+
+@admin.register(SupplierOrder)
+class SupplierOrderAdmin(admin.ModelAdmin):
+    list_display = (
+        'date', 'book_no', 'supplier', 'order_no', 'stone', 'shape', 'color',
+        'carats', 'weight_per_piece', 'price_usd_per_piece', 'price_usd_per_ct', 'total_usd'
+    )
+    search_fields = ('date', 'supplier', 'order_no', 'stone', 'color', 'shape')
+    list_filter = ('supplier', 'stone', 'shape', 'color')
+    ordering = ('-date',)
+    date_hierarchy = 'date'
+===== /home/smaug/piat/piat-tools/core/supplier_order/services/imports.py =====
+
+===== /home/smaug/piat/piat-tools/core/supplier_order/services/transform.py =====
 from django.db import transaction
 
 from core.common.services.filters.mapping import FieldMappingFilter
 from core.common.services.filters.type_parsing import TypeParsingFilter
 from core.common.services.filters.context import TransformContext
-from core.common.services.filters.validity import SupplierValidityFilter
+from core.common.services.filters.canceled import CanceledFieldFilter
+from core.common.services.filters.required import RequiredFieldFilter
 
 from core.order_raw.models import SupplierOrderRaw
 from core.supplier_order.models import SupplierOrder
-from core.supplier_order.mapping import SUPPLIER_COLUMN_MAPPING
+from core.supplier_order.mapping import SUPPLIER_COLUMN_MAPPING, RAW_SUPPLIER_COLUMN_MAPPING
+from core.supplier_order.services.filters.is_purchase import IsPurchaseFilter
 
 class SupplierContext(TransformContext):
     """
-    Fields in attrs
-    'client_memo':          
-    'date':                 
-    'book_no':              
-    'order_no':             
-    'tax_invoice':          
-    'supplier':             
-    'number':               
-    'stone':                
-    'heating':              
-    'color':                
-    'shape':                
-    'size':                 
-    'carats':               
-    'currency':             
-    'price_cur_per_unit':   
-    'unit':                 
-    'total_thb':            
-    'weight_per_piece':     
-    'price_usd_per_ct':     
-    'price_usd_per_piece':  
-    'total_usd':            
-    'rate_avg_2019':        
-    'remarks':              
-    'credit_term':          
-    'target_size':          
+    Contexte de transformation pour SupplierOrder, avec les champs attendus dans `attrs`.
     """
     def __init__(self, raw):
         super().__init__(raw, SupplierOrder)
         
-
 class SupplierOrderTransformer:
     def __init__(self, dry_run=False):
         self.dry_run = dry_run
-        # mapping → parsing → validité
         self.filters = [
+            IsPurchaseFilter(),
             FieldMappingFilter(field_mapping=SUPPLIER_COLUMN_MAPPING),
             TypeParsingFilter(order_model=SupplierOrder),
-            SupplierValidityFilter(),
+            CanceledFieldFilter(),
+            RequiredFieldFilter(),
         ]
+        ut = SupplierOrder._meta.unique_together
+        if ut:
+            first = ut[0] if isinstance(ut[0], (list, tuple)) else ut
+            self.unique_fields = list(first)
+        else:
+            self.unique_fields = []
 
     def transform_one(self, raw):
-        
         ctx = TransformContext(raw, SupplierOrder)
-        
-       
         try:
             for filt in self.filters:
-                
                 if not filt.apply(ctx):
                     raise ValueError(f"{ctx.error} from {filt}")
-            
             ctx.instantiate_order()
             ctx.order.full_clean()
-            
         except Exception as e:
             ctx.error = str(e)
-            return ctx
-        
-            
         return ctx
-
 
     def run(self, queryset=None, batch_size=1000):
         orders_to_create = []
-        stats = {'total_raws': 0, 'orders_created': 0, 'raws_failed': 0, 'errors': {}}
-        key = {} # hash key to check doublon
+        stats = {
+            'total_raws': 0,
+            'orders_created': 0,
+            'raws_failed': 0,
+            'skipped_duplicates': 0,
+            'errors': {}
+        }
+        seen_keys = set()
+
         for raw in queryset.iterator():
             stats['total_raws'] += 1
             ctx = self.transform_one(raw)
 
             if ctx.error is None:
-                orders_to_create.append(ctx.order)
-                stats['orders_created'] += 1
+                # Construction de la clé de doublon depuis les champs uniques
+                key = tuple(getattr(ctx.order, f) for f in self.unique_fields)
+                if key in seen_keys:
+                    stats['skipped_duplicates'] += 1
+                else:
+                    seen_keys.add(key)
+                    orders_to_create.append(ctx.order)
+                    stats['orders_created'] += 1
             else:
                 stats['raws_failed'] += 1
-                error_key = ctx.error[:10]
-                if not error_key in stats['errors'].keys():
-                    print(ctx.error)
+                error_key = ctx.error[:40]
+                if error_key not in stats['errors']:
                     stats['errors'][error_key] = [f"{ctx.raw.sheet_name} - {ctx.raw.row_index} : {ctx.error}", 1]
                 else:
-                    stats['errors'][error_key][1] +=1
+                    stats['errors'][error_key][1] += 1
 
+            # Bulk insert par batch
             if len(orders_to_create) >= batch_size:
                 if not self.dry_run:
                     with transaction.atomic():
-                        SupplierOrder.objects.bulk_create(
-                            orders_to_create, batch_size
-                        )
+                        SupplierOrder.objects.bulk_create(orders_to_create, batch_size)
                 orders_to_create.clear()
 
+        # Flush final
         if not self.dry_run and orders_to_create:
             with transaction.atomic():
-                SupplierOrder.objects.bulk_create(
-                        orders_to_create, batch_size
-                    )
+                SupplierOrder.objects.bulk_create(orders_to_create, batch_size)
+
         return stats
 
-===== ./core/supplier_order/services/exports.py =====
+===== /home/smaug/piat/piat-tools/core/supplier_order/services/exports.py =====
 import openpyxl
 from openpyxl.utils import get_column_letter
 from django.http import HttpResponse
@@ -1494,8 +1726,30 @@ def export_orders_to_excel(queryset, filename="orders.xlsx", columns=None, field
 
     return response
 
+===== /home/smaug/piat/piat-tools/core/supplier_order/services/filters/__init__.py =====
 
-===== ./core/supplier_order/services/old_imports.py =====
+===== /home/smaug/piat/piat-tools/core/supplier_order/services/filters/is_purchase.py =====
+import pandas as pd
+
+from django.db.models import Field
+
+from core.common.tools.row import get_value_mapped
+from core.common.services.filters.base import BaseTransformFilter
+from core.supplier_order.mapping import RAW_SUPPLIER_COLUMN_MAPPING
+    
+    
+class IsPurchaseFilter(BaseTransformFilter):
+    """Filter the 'Order' that are actual purchased."""
+    def apply(self, ctx):
+        memo = get_value_mapped(ctx.raw.data, "client_memo", RAW_SUPPLIER_COLUMN_MAPPING) or ""
+        memo = memo.strip().upper()
+        if memo in {"", "P"}:
+            return True
+        ctx.error = f"Not a purchase : client memo [{memo}]"
+        return False
+        
+        
+===== /home/smaug/piat/piat-tools/core/supplier_order/services/old_imports.py =====
 import sys
 import pandas as pd
 from django.db import IntegrityError
@@ -1674,12 +1928,9 @@ def import_supplier_orders(file_path):
 
     return report
 
+===== /home/smaug/piat/piat-tools/core/supplier_order/services/__init__.py =====
 
-===== ./core/supplier_order/services/__init__.py =====
-
-
-===== ./core/supplier_order/models.py =====
-# core/models/supplier_order.py
+===== /home/smaug/piat/piat-tools/core/supplier_order/models.py =====
 from django.db import models
 from django.core.exceptions import ValidationError
 
@@ -1712,24 +1963,24 @@ class SupplierOrder(models.Model):
     )
 
     # Info
-    date         = models.DateTimeField()
-    book_no      = models.IntegerField(blank=True, null=True, default=0)
-    order_no     = models.IntegerField(default=0)
-    supplier     = models.CharField(max_length=50)
-
-    # Stone
-    number            = models.IntegerField()
-    stone             = models.CharField(max_length=50) # to parse
-    heating           = models.CharField(max_length=20, blank=True, null=True)
-    color             = models.CharField(max_length=50, blank=True, null=True) # to parse
-    shape             = models.CharField(max_length=50, blank=True, null=True) # to parse
-    cutting           = models.CharField(max_length=50, blank=True, null=True) # to parse
-    size              = models.CharField(max_length=50, blank=True, null=True) # to parse
-    carats            = models.DecimalField(max_digits=10, decimal_places=3, blank=True, null=True)
-    weight_per_piece  = models.DecimalField(max_digits=10, decimal_places=3, blank=True, null=True)
+    date                = models.DateTimeField()
+    book_no             = models.IntegerField(blank=True, null=True)
+    order_no            = models.IntegerField(blank=True, null=True)
+    supplier            = models.CharField(max_length=50)
+    
+    # Stone 
+    number              = models.IntegerField(blank=True, null=True)
+    stone               = models.CharField(max_length=50, blank=True, null=True) # to parse
+    heating             = models.CharField(max_length=20, blank=True, null=True)
+    color               = models.CharField(max_length=50, blank=True, null=True) # to parse
+    shape               = models.CharField(max_length=50, blank=True, null=True) # to parse
+    cutting             = models.CharField(max_length=50, blank=True, null=True) # to parse
+    size                = models.CharField(max_length=50, blank=True, null=True) # to parse
+    carats              = models.DecimalField(max_digits=10, decimal_places=3, blank=True, null=True)
+    weight_per_piece    = models.DecimalField(max_digits=10, decimal_places=3, blank=True, null=True)
 
     # Price
-    price_usd_per_piece = models.DecimalField(max_digits=13, decimal_places=3)
+    price_usd_per_piece = models.DecimalField(max_digits=13, decimal_places=3, blank=True, null=True)
     price_usd_per_ct    = models.DecimalField(max_digits=13, decimal_places=3, blank=True, null=True)
     total_usd           = models.DecimalField(max_digits=13, decimal_places=3, blank=True, null=True)
     
@@ -1750,8 +2001,7 @@ class SupplierOrder(models.Model):
 
 
 
-
-===== ./core/supplier_order/views/export.py =====
+===== /home/smaug/piat/piat-tools/core/supplier_order/views/export.py =====
 from core.supplier_order.models import SupplierOrder
 from core.supplier_order.mapping import SUPPLIER_ORDER_FIELDS
 from core.common.views.export import orders_export
@@ -1764,8 +2014,7 @@ def supplier_orders_export(request):
         order_name="supplier"
     )
 
-
-===== ./core/supplier_order/views/views.py =====
+===== /home/smaug/piat/piat-tools/core/supplier_order/views/views.py =====
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
@@ -1797,15 +2046,14 @@ def fill_missing_prices(request):
     report = service.run()
 
     return JsonResponse(report)
-
-===== ./core/supplier_order/views/api.py =====
+===== /home/smaug/piat/piat-tools/core/supplier_order/views/api.py =====
 
 from django.views.decorators.csrf import csrf_exempt
 
 from core.supplier_order.mapping import SUPPLIER_ORDER_FIELDS
 from core.supplier_order.models import SupplierOrder
-from core.common.views.wrapper_order.api.json import orders_json
-from core.common.views.wrapper_order.api.update import order_update
+from core.common.views.api.json import orders_json
+from core.common.views.api.update import order_update
 
     
 def supplier_orders_json(request):
@@ -1830,10 +2078,9 @@ def supplier_order_update(request):
     )
 
 
+===== /home/smaug/piat/piat-tools/core/supplier_order/views/import_.py =====
 
-===== ./core/supplier_order/views/import_.py =====
-
-from core.supplier_order.services.imports import import_supplier_orders
+from core.supplier_order.services.old_imports import import_supplier_orders
 from core.common.views.import_ import orders_import_upload
 
 def supplier_orders_import_upload(request):
@@ -1843,16 +2090,9 @@ def supplier_orders_import_upload(request):
         order_name="supplier"
     )
 
+===== /home/smaug/piat/piat-tools/core/supplier_order/views/__init__.py =====
 
-===== ./core/supplier_order/views/__init__.py =====
-from .views import supplier_orders_list, supplier_orders_import_page, fill_missing_prices
-from .api import supplier_orders_json, supplier_order_update
-from .export import supplier_orders_export
-from .import_ import supplier_orders_import_upload
-
-
-===== ./core/supplier_order/mapping.py =====
-# core/mappings/supplier_order.py
+===== /home/smaug/piat/piat-tools/core/supplier_order/mapping.py =====
 
 SUPPLIER_ORDER_FIELDS = [
     ("date", "Date"),
@@ -1883,7 +2123,7 @@ SUPPLIER_ORDER_FIELDS = [
 
 
 RAW_SUPPLIER_COLUMN_MAPPING = {
-    'client_memo':          ['Client Memo', 'Purchase (P) Memo (M) Bargain (B)'],
+    'client_memo':          ['Client Memo', 'Purchase (P) Memo (M) Bargain (B)', 'Purchase(P)\nMemo (M)\nBargain (B)'],
     'date':                 ['Date'],
     'book_no':              ['Book No.', 'Book No'],
     'order_no':             ['No.', 'Order No', 'No'],
@@ -1923,7 +2163,7 @@ SUPPLIER_COLUMN_MAPPING = {
     'size':                 ['Size', 'Dimensions'],
     'carats':               ['Carats', 'Weight (ct)'],
     'weight_per_piece':     ['Weight per piece', 'Weight/Piece'],
-    'price_usd_per_ct':     ['price $/ct ', 'Price $/ct', 'Price per ct $'],
+    'price_usd_per_ct':     ['price $/ct ', 'Price $/ct', 'Price per ct $', 'price/$ '],
     'price_usd_per_piece':  ['price/$ per piece', 'Price/$ per Piece'],
     'total_usd':            ['Total $', 'USD Total'],
 }
@@ -1935,9 +2175,79 @@ INVERSE_SUPPLIER_COLUMN_MAPPING = {
     for alias in aliases
 }
 
+===== /home/smaug/piat/piat-tools/core/supplier_order/tests/test_transform.py =====
+from django.test import TestCase
+from core.order_raw.models import SupplierOrderRaw
+from core.supplier_order.services.transform import SupplierOrderTransformer
+from core.supplier_order.models import SupplierOrder
 
-===== ./core/supplier_order/management/commands/check_integrity_supplier_order.py =====
-# core/management/commands/check_data_integrity.py
+class TransformErrorAndDuplicateTests(TestCase):
+    def setUp(self):
+        # un raw valide minimal pour pouvoir échouer sur date ou carats
+        base = {
+            'Client Memo': 'P',
+            'No.': '1',
+            'DATE': '2025-05-06',
+            'Stone': 'Ruby',
+            'PC': '2',
+            'Carats': '1.00',
+        }
+        self.valid_payload = base.copy()
+
+    def make_raw(self, overrides):
+        data = {**self.valid_payload, **overrides}
+        return SupplierOrderRaw.objects.create(
+            source_file='f.xlsx', sheet_name='S1', row_index=0, data=data
+        )
+
+    def test_should_fail_on_invalid_date_in_transform(self):
+        raw = self.make_raw({'DATE': '06/05/2025'})
+        stats = SupplierOrderTransformer(dry_run=True).run(
+            queryset=SupplierOrderRaw.objects.filter(id=raw.id)
+        )
+        self.assertEqual(stats['orders_created'], 0)
+        self.assertGreater(stats['raws_failed'], 0)
+        # message d'erreur date présent
+        err_keys = list(stats['errors'].keys())
+        self.assertTrue(any("Invalid date format" in k for k in err_keys))
+
+    def test_should_fail_on_invalid_carats_in_transform(self):
+        raw = self.make_raw({'Carats': 'abc'})
+        stats = SupplierOrderTransformer(dry_run=True).run(
+            queryset=SupplierOrderRaw.objects.filter(id=raw.id)
+        )
+        self.assertEqual(stats['orders_created'], 0)
+        self.assertGreater(stats['raws_failed'], 0)
+        err_keys = list(stats['errors'].keys())
+        self.assertTrue(any("Decimal" in k or "carats" in k for k in err_keys))
+
+    def test_partially_invalid_row_still_rejected(self):
+        # même si les autres champs sont ok, carats invalide => rejet
+        raw = self.make_raw({'Carats': 'not-a-number'})
+        stats = SupplierOrderTransformer(dry_run=True).run(
+            queryset=SupplierOrderRaw.objects.filter(id=raw.id)
+        )
+        self.assertEqual(stats['orders_created'], 0)
+        self.assertEqual(stats['raws_failed'], 1)
+
+    def test_duplicate_skipped_by_bulk_and_clean(self):
+        # créer deux raws identiques
+        raw1 = self.make_raw({'No.': '10', 'DATE': '2025-05-06'})
+        raw2 = self.make_raw({'No.': '10', 'DATE': '2025-05-06'})
+        # 1er passage crée un order
+        t = SupplierOrderTransformer(dry_run=False)
+        stats1 = t.run(queryset=SupplierOrderRaw.objects.filter(id=raw1.id))
+        self.assertEqual(stats1['orders_created'], 1)
+        # 2e passage, même données => bulk_create ignore & clean() rejette
+        stats2 = t.run(queryset=SupplierOrderRaw.objects.filter(id=raw2.id))
+        self.assertEqual(stats2['skipped_duplicates'], 1)
+        self.assertEqual(stats2['orders_created'], 0)
+
+===== /home/smaug/piat/piat-tools/core/supplier_order/tests/__init__.py =====
+
+===== /home/smaug/piat/piat-tools/core/supplier_order/__init__.py =====
+
+===== /home/smaug/piat/piat-tools/core/management/commands/check_integrity_supplier_order.py =====
 
 import json
 from datetime import date
@@ -2120,10 +2430,7 @@ class Command(BaseCommand):
                 json.dump(report, f, default=str, indent=2)
             self.stdout.write(self.style.SUCCESS(f"\nFull report written to {path}"))
 
-
-===== ./core/supplier_order/management/commands/delete_supplier_db.py =====
-# core/management/commands/delete_supplier_db.py
-
+===== /home/smaug/piat/piat-tools/core/management/commands/delete_supplier_db.py =====
 from django.core.management.base import BaseCommand
 from core.supplier_order.models import SupplierOrder
 
@@ -2136,8 +2443,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"[DONE] Supplier orders database has been cleared ({size} elements have been deleted)."))
         
 
-
-===== ./core/supplier_order/management/commands/export_supplier_orders.py =====
+===== /home/smaug/piat/piat-tools/core/management/commands/export_supplier_orders.py =====
 from django.core.management.base import BaseCommand
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -2200,10 +2506,7 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(f"[DONE] Exported {orders.count()} supplier orders to '{filename}'"))
 
-
-===== ./core/supplier_order/management/commands/import_supplier_orders.py =====
-# core/management/commands/import_supplier_orders.py
-
+===== /home/smaug/piat/piat-tools/core/management/commands/import_supplier_orders.py =====
 from django.core.management.base import BaseCommand
 
 class Command(BaseCommand):
@@ -2249,246 +2552,7 @@ class Command(BaseCommand):
         except Exception as e:
             self.stderr.write(self.style.ERROR(f"[ERROR] An error occurred during import: {str(e)}"))
 
-
-===== ./core/supplier_order/management/commands/transform_supplier_orders.py =====
-from django.core.management.base import BaseCommand
-from core.order_raw.models import SupplierOrderRaw
-from core.supplier_order.services.transform import SupplierOrderTransformer
-
-class Command(BaseCommand):
-    help = "Transforme les raws fournisseurs en SupplierOrder."
-
-    def add_arguments(self, parser):
-        parser.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="Simulate the command without saving it."
-        )
-        parser.add_argument(
-            "--batch-size",
-            type=int,
-            default=1000,
-            help="Size of the flunch (higher is quicker but use more memory)."
-        )
-
-
-    def handle(self, *args, **kwargs):
-        transformer = SupplierOrderTransformer(dry_run=kwargs["dry_run"])
-        qs = SupplierOrderRaw.objects.filter(interpreted__isnull=True)
-        stats = transformer.run(queryset=qs, batch_size=kwargs["batch_size"])
-        if stats["orders_created"] == 0:
-            self.stdout.write(self.style.ERROR(
-                f"Transform error (0 orders created) :\n"
-                f"  total raws : {stats['total_raws']}\n"
-                f"  orders created : {stats['orders_created']}\n"
-                f"  raws errors : {stats['raws_failed']}"
-            ))
-            self.stdout.write(self.style.ERROR("First 10 samples of errors\n"))
-            for _, error in zip(range(10), stats['errors'].values()):
-                self.stdout.write(self.style.ERROR(f"{error[1]} of {error[0]}\n"))
-
-        else:
-            self.stdout.write(self.style.SUCCESS(
-                f"Transform done :\n"
-                f"  total raws : {stats['total_raws']}\n"
-                f"  orders created : {stats['orders_created']}\n"
-                f"  raws errors : {stats['raws_failed']}"
-            ))
-            self.stdout.write(self.style.ERROR("First 10 samples of errors\n"))
-            for _, error in zip(range(10), stats['errors'].values()):
-                self.stdout.write(self.style.ERROR(f"{error[1]} of {error[0]}\n"))
-
-
-
-===== ./core/supplier_order/management/commands/__init__.py =====
-
-
-===== ./core/supplier_order/management/commands/fill_missing_prices.py =====
-from django.core.management.base import BaseCommand
-from core.services.tools.order_pricing import MissingPriceFiller
-
-class Command(BaseCommand):
-    help = "Fill missing USD price fields on SupplierOrder."
-
-    def add_arguments(self, parser):
-        parser.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="Show what would be updated, without saving."
-        )
-        parser.add_argument(
-            "--verbose",
-            action="store_true",
-            help="Verbose logging of each order processed."
-        )
-
-    def handle(self, *args, **options):
-        service = MissingPriceFiller(
-            dry_run=options["dry_run"],
-            verbose=options["verbose"],
-        )
-        report = service.run()
-
-        self.stdout.write(self.style.SUCCESS(
-            f"Processed {report['to_update']} orders, updated {report['updated']}."
-        ))
-        if report["errors"]:
-            self.stdout.write(self.style.WARNING(
-                f"{len(report['errors'])} orders failed to convert:"
-            ))
-            for err in report["errors"]:
-                self.stdout.write(f" - Order {err['order_id']}: {err['error']}")
-
-
-===== ./core/supplier_order/__init__.py =====
-
-
-===== ./core/client_order/models.py =====
-from django.db import models
-from django.core.exceptions import ValidationError
-
-class Client(models.Model):
-    name = models.CharField(max_length=255)
-
-class Supplier(models.Model):
-    name = models.CharField(max_length=255)
-
-class ClientOrder(models.Model):
-    """An Order made by a client.
-
-    ::note:
-        The 'total_price_thb' is at the change rate of 'date' 
-    """
-    order_no = models.IntegerField()
-    client:Client = models.ForeignKey(Client, on_delete=models.CASCADE)
-    date = models.DateTimeField()
-    total_price_usd = models.DecimalField(max_digits=10, decimal_places=2)
-    # "At the rate when the command was made"
-    total_price_thb = models.DecimalField(max_digits=10, decimal_places=2)
-    
-    total_weight = models.DecimalField(max_digits=4, decimal_places=2)
-    
-    def __str__(self):
-        return f"Client Order {self.id} - {self.client.name}"
-
-
-===== ./core/order_raw/services/imports.py =====
-# core/services/supplier_order_raw_import.py
-
-import pandas as pd
-import numpy as np
-from django.db import transaction
-from core.order_raw.models import OrderRaw, SupplierOrderRaw, ClientOrderRaw
-
-class OrderRawImportService:
-    """
-    Import all rows from an Excel into OrderRaw.
-    """
-
-    def __init__(self, file_path: str, order_type: str):
-        self.file_path = file_path
-        if order_type == 'supplier':
-            self.order_model = SupplierOrderRaw 
-        elif order_type == 'client':
-            self.order_model = ClientOrderRaw
-        else:
-            self.order_model = OrderRaw
-
-    def _serialize_value(self, v):
-        if pd.isna(v):
-            return ""
-        if isinstance(v, pd.Timestamp):
-            return v.to_pydatetime().isoformat()
-        return str(v)
-        
-    def _has_meaningful_data(self, payload: dict) -> bool:
-        for v in payload.values():
-            if v not in (None, "", 0, 0.0):
-                return True
-        return False
-
-    
-    def run(self) -> dict:
-        report = {'imported': 0, 'skipped': 0, 'failed': []}
-        sheets = pd.read_excel(self.file_path, sheet_name=None)
-
-        for sheet_name, df in sheets.items():
-            instances = []
-            for idx, row in df.iterrows():
-                payload = {k: self._serialize_value(v) for k, v in row.to_dict().items()}
-                if self._has_meaningful_data(payload):
-                    instances.append(self.order_model(
-                        source_file=self.file_path,
-                        sheet_name=sheet_name,
-                        row_index=idx,
-                        data=payload
-                    ))
-                else:
-                    report['skipped']+=1
-            with transaction.atomic():
-                self.order_model.objects.bulk_create(instances, batch_size=500)
-            report['imported'] += len(instances)
-
-        return report
-
-
-
-
-===== ./core/order_raw/models.py =====
-# core/models/order_raw.py
-
-from django.db import models
-from django.core.serializers.json import DjangoJSONEncoder
-
-class OrderRaw(models.Model):
-    """
-    Raw data just as the file imported.
-    """
-    source_file = models.CharField(max_length=255)
-    sheet_name  = models.CharField(max_length=255, blank=True, null=True)
-    row_index   = models.IntegerField(blank=True, null=True)
-    data        = models.JSONField(
-        help_text="Raw data from Excel line",
-        encoder=DjangoJSONEncoder)
-
-class SupplierOrderRaw(models.Model):
-    class Meta:
-        verbose_name = "Raw Supplier Order"
-        verbose_name_plural = "Raw Supplier Orders"
-        
-    source_file = models.CharField(max_length=255)
-    sheet_name  = models.CharField(max_length=255, blank=True, null=True)
-    row_index   = models.IntegerField(blank=True, null=True)
-    data        = models.JSONField(
-        help_text="Raw data from Excel line",
-        encoder=DjangoJSONEncoder)
-
-    def __str__(self):
-        return f"RawSupplier #{self.id} – row {self.row_index}"
-
-
-class ClientOrderRaw(models.Model):
-    class Meta:
-        verbose_name = "Raw Client Order"
-        verbose_name_plural = "Raw Client Orders"
-
-    source_file = models.CharField(max_length=255)
-    sheet_name  = models.CharField(max_length=255, blank=True, null=True)
-    row_index   = models.IntegerField(blank=True, null=True)
-    data        = models.JSONField(
-        help_text="Raw data from Excel line",
-        encoder=DjangoJSONEncoder)
-
-
-       
-    def __str__(self):
-        return f"RawClient #{self.id} – row {self.row_index}"
-
-
-
-===== ./core/order_raw/management/commands/delete_raw.py =====
-# core/management/commands/import_supplier_orders.py
-
+===== /home/smaug/piat/piat-tools/core/management/commands/delete_raw.py =====
 from django.core.management.base import BaseCommand
 from core.order_raw.models import OrderRaw, SupplierOrderRaw, ClientOrderRaw
 
@@ -2515,10 +2579,57 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"[DONE] Raw orders {kwargs['type']} has been cleared ({size} elements have been deleted)."))
         
 
+===== /home/smaug/piat/piat-tools/core/management/commands/transform_supplier_orders.py =====
+from django.core.management.base import BaseCommand
+from core.order_raw.models import SupplierOrderRaw
+from core.supplier_order.services.transform import SupplierOrderTransformer
 
-===== ./core/order_raw/management/commands/import_raw.py =====
-# core/management/commands/import_supplier_raw.py
+class Command(BaseCommand):
+    help = "Transforme les raws fournisseurs en SupplierOrder."
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Simulate the command without saving it."
+        )
+        parser.add_argument(
+            "--batch-size",
+            type=int,
+            default=1000,
+            help="Size of the flunch (higher is quicker but use more memory)."
+        )
+
+    def handle(self, *args, **kwargs):
+        transformer = SupplierOrderTransformer(dry_run=kwargs["dry_run"])
+        qs = SupplierOrderRaw.objects.filter(interpreted__isnull=True)
+        stats = transformer.run(queryset=qs, batch_size=kwargs["batch_size"])
+        if stats["orders_created"] == 0:
+            self.stdout.write(self.style.ERROR(
+                f"Transform error (0 orders created) :\n"
+                f"  total raws : {stats['total_raws']}\n"
+                f"  orders created : {stats['orders_created']}\n"
+                f"  raws errors : {stats['raws_failed']}"
+            ))
+            errors = list(sorted(stats['errors'].values(), key= lambda e: e[1], reverse=True))
+            self.stdout.write(self.style.ERROR("First 10 samples of errors\n"))
+            for _, error in zip(range(10), errors):
+                self.stdout.write(self.style.ERROR(f"{error[1]} of {error[0]}\n"))
+
+        else:
+            self.stdout.write(self.style.SUCCESS(
+                f"Transform done :\n"
+                f"  total raws : {stats['total_raws']}\n"
+                f"  orders created : {stats['orders_created']}\n"
+                f"  raws errors : {stats['raws_failed']}"
+            ))
+            errors = list(sorted(stats['errors'].values(), key= lambda e: e[1], reverse=True))
+            self.stdout.write(self.style.WARNING("First 10 samples of errors\n"))
+            for _, error in zip(range(10), errors):
+                self.stdout.write(self.style.WARNING(f"{error[1]} of {error[0]}\n"))
+
+
+===== /home/smaug/piat/piat-tools/core/management/commands/import_raw.py =====
 from django.core.management.base import BaseCommand, CommandError
 from core.order_raw.services.imports import OrderRawImportService
 
@@ -2557,17 +2668,311 @@ class Command(BaseCommand):
             for f in report['failed']:
                 self.stdout.write(f"  [Sheet {f['sheet']} row {f['row']}] {f['error']}")
 
+===== /home/smaug/piat/piat-tools/core/management/commands/__init__.py =====
 
-===== ./core/order_raw/management/commands/__init__.py =====
+===== /home/smaug/piat/piat-tools/core/management/commands/fill_missing_prices.py =====
+from django.core.management.base import BaseCommand
+from core.services.tools.order_pricing import MissingPriceFiller
+
+class Command(BaseCommand):
+    help = "Fill missing USD price fields on SupplierOrder."
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Show what would be updated, without saving."
+        )
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="Verbose logging of each order processed."
+        )
+
+    def handle(self, *args, **options):
+        service = MissingPriceFiller(
+            dry_run=options["dry_run"],
+            verbose=options["verbose"],
+        )
+        report = service.run()
+
+        self.stdout.write(self.style.SUCCESS(
+            f"Processed {report['to_update']} orders, updated {report['updated']}."
+        ))
+        if report["errors"]:
+            self.stdout.write(self.style.WARNING(
+                f"{len(report['errors'])} orders failed to convert:"
+            ))
+            for err in report["errors"]:
+                self.stdout.write(f" - Order {err['order_id']}: {err['error']}")
+
+===== /home/smaug/piat/piat-tools/core/client_order/models.py =====
+from django.db import models
+from django.core.exceptions import ValidationError
+
+from core.common.models import Client
+
+class ClientOrder(models.Model):
+    """An Order made by a client.
+
+    ::note:
+        The 'total_price_thb' is at the change rate of 'date' 
+    """
+    order_no = models.IntegerField()
+    client:Client = models.ForeignKey(Client, on_delete=models.CASCADE)
+    date = models.DateTimeField()
+    total_price_usd = models.DecimalField(max_digits=10, decimal_places=2)
+    # "At the rate when the command was made"
+    total_price_thb = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    total_weight = models.DecimalField(max_digits=4, decimal_places=2)
+    
+    def __str__(self):
+        return f"Client Order {self.id} - {self.client.name}"
+
+===== /home/smaug/piat/piat-tools/core/order_raw/services/imports.py =====
+import pandas as pd
+import numpy as np
+import numbers
+from datetime import date, datetime
+from django.db import transaction
+
+from core.order_raw.models import OrderRaw, SupplierOrderRaw, ClientOrderRaw
+
+class OrderRawImportService:
+    """
+    Import all rows from an Excel into OrderRaw.
+    """
+
+    def __init__(self, file_path: str, order_type: str):
+        self.file_path = file_path
+        if order_type == 'supplier':
+            self.order_model = SupplierOrderRaw 
+        elif order_type == 'client':
+            self.order_model = ClientOrderRaw
+        else:
+            self.order_model = OrderRaw
+
+    def _serialize_value(self, v):
+        if pd.isna(v):
+            return ""
+        return str(v)
+        
+    def _has_meaningful_data(self, payload: dict, N=3) -> bool:
+        """
+        Check if a row have at least 'N' valuable information. (not empty and not None, null, NaN or 0, .0)
+        """
+        n = 0
+        for v in payload.values():
+            if v is None or (isinstance(v, str) and v == ""):
+                continue
+            if isinstance(v, str):
+                try:
+                    if float(v) == 0:
+                        continue
+                    if len(v) < 2:
+                        continue
+                    n+=1
+                except ValueError:
+                    n+=1
+            if isinstance(v, numbers.Number):
+                if v == 0:
+                    continue
+                n+=1
+            if n >=N:
+                return True
+        return False
+    
+    def run(self) -> dict:
+        report = {'imported': 0, 'skipped': 0, 'failed': []}
+        sheets = pd.read_excel(self.file_path, sheet_name=None)
+
+        for sheet_name, df in sheets.items():
+            instances = []
+            for idx, row in df.iterrows():
+                payload = {k: self._serialize_value(v) for k, v in row.to_dict().items()}
+                if self._has_meaningful_data(payload):
+                    instances.append(self.order_model(
+                        source_file=self.file_path,
+                        sheet_name=sheet_name,
+                        row_index=idx,
+                        data=payload
+                    ))
+                else:
+                    report['skipped']+=1
+            with transaction.atomic():
+                self.order_model.objects.bulk_create(instances, batch_size=500)
+            report['imported'] += len(instances)
+
+        return report
 
 
-===== ./core/order_raw/tests.py =====
+
+===== /home/smaug/piat/piat-tools/core/order_raw/models.py =====
+from django.db import models
+from django.core.serializers.json import DjangoJSONEncoder
+
+UNIQUE_SUPPLIER_LOT =('source_file', 'sheet_name', 'row_index')
+
+class OrderRaw(models.Model):
+    """
+    Raw data just as the file imported.
+    """
+    class Meta:
+        unique_together = UNIQUE_SUPPLIER_LOT
+        constraints = [
+            models.UniqueConstraint(
+                fields=list(UNIQUE_SUPPLIER_LOT),
+                name='unique_raw_order_lot'
+            )
+        ]
+        
+    source_file = models.CharField(max_length=255)
+    sheet_name  = models.CharField(max_length=255, blank=True, null=True)
+    row_index   = models.IntegerField(blank=True, null=True)
+    data        = models.JSONField(
+                    help_text="Raw data from Excel line",
+                    encoder=DjangoJSONEncoder)
+
+class SupplierOrderRaw(models.Model):
+    class Meta:
+        unique_together = UNIQUE_SUPPLIER_LOT
+        constraints = [
+            models.UniqueConstraint(
+                fields=list(UNIQUE_SUPPLIER_LOT),
+                name='unique_supplier_raw_order_lot'
+            )
+        ]
+        verbose_name = "Raw Supplier Order"
+        verbose_name_plural = "Raw Supplier Orders"
+        
+    source_file = models.CharField(max_length=255)
+    sheet_name  = models.CharField(max_length=255, blank=True, null=True)
+    row_index   = models.IntegerField(blank=True, null=True)
+    data        = models.JSONField(
+                    help_text="Raw data from Excel line",
+                    encoder=DjangoJSONEncoder)
+
+    def __str__(self):
+        return f"RawSupplier #{self.id} – row {self.row_index}"
 
 
-===== ./core/__init__.py =====
+class ClientOrderRaw(models.Model):
+    class Meta:
+        unique_together = UNIQUE_SUPPLIER_LOT
+        constraints = [
+            models.UniqueConstraint(
+                fields=list(UNIQUE_SUPPLIER_LOT),
+                name='unique_client_raw_order_lot'
+            )
+        ]
+        verbose_name = "Raw Client Order"
+        verbose_name_plural = "Raw Client Orders"
+
+    source_file = models.CharField(max_length=255)
+    sheet_name  = models.CharField(max_length=255, blank=True, null=True)
+    row_index   = models.IntegerField(blank=True, null=True)
+    data        = models.JSONField(
+                    help_text="Raw data from Excel line",
+                    encoder=DjangoJSONEncoder)
 
 
-===== ./core/apps.py =====
+       
+    def __str__(self):
+        return f"RawClient #{self.id} – row {self.row_index}"
+
+
+===== /home/smaug/piat/piat-tools/core/order_raw/__init__.py =====
+
+===== /home/smaug/piat/piat-tools/core/order_raw/tests.py =====
+import os
+import tempfile
+from decimal import Decimal
+from datetime import datetime
+import pandas as pd
+import numpy as np
+
+from django.test import TestCase
+
+from core.order_raw.services.imports import OrderRawImportService
+from core.order_raw.models import OrderRaw, SupplierOrderRaw, ClientOrderRaw
+
+
+class OrderRawImportServiceTests(TestCase):
+    def setUp(self):
+        # Create a temporary Excel file with two sheets
+        self.tmpfile = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        df1 = pd.DataFrame([
+            {"A": np.nan, "B": None},
+            {"A": 1,     "B": "foo"},
+        ])
+        df2 = pd.DataFrame([
+            {"X": 0, "Y": 0.0, "Z": ""},   
+            {"X": 5, "Y": 3.14, "Z": "bar"},
+        ])
+        with pd.ExcelWriter(self.tmpfile.name, engine="openpyxl") as writer:
+            df1.to_excel(writer, sheet_name="Sheet1", index=False)
+            df2.to_excel(writer, sheet_name="Sheet2", index=False)
+        self.tmpfile.close()
+
+    def tearDown(self):
+        os.unlink(self.tmpfile.name)
+
+    def test_serialize_value(self):
+        svc = OrderRawImportService(self.tmpfile.name, order_type="supplier")
+        # NaN -> empty
+        self.assertEqual(svc._serialize_value(np.nan), "")
+        # Timestamp -> ISO string
+        ts = pd.Timestamp("2025-05-02T13:45:00")
+        iso = svc._serialize_value(ts)
+        self.assertTrue(isinstance(iso, str) and iso.startswith("2025-05-02T13:45"))
+        # Numeric types -> str
+        self.assertEqual(svc._serialize_value(np.int64(7)), "7")
+        self.assertEqual(svc._serialize_value("abc"), "abc")
+        self.assertEqual(svc._serialize_value(3.21), "3.21")
+
+    def test_has_meaningful_data(self):
+        svc = OrderRawImportService(self.tmpfile.name, order_type="client")
+        # All empty or zeros -> False
+        self.assertFalse(svc._has_meaningful_data({"a": None, "b": "", "c": 0, "d": 0.0}))
+        # One non-zero -> True
+        self.assertTrue(svc._has_meaningful_data({"a": None, "b": "", "c": 1, "d": 0.0}))
+
+    def test_run_supplier_import(self):
+        svc = OrderRawImportService(self.tmpfile.name, order_type="supplier")
+        report = svc.run()
+        self.assertEqual(report["imported"], 2)
+        self.assertEqual(report["skipped"], 2)
+        self.assertEqual(SupplierOrderRaw.objects.count(), 2)
+
+    def test_run_client_import(self):
+        svc = OrderRawImportService(self.tmpfile.name, order_type="client")
+        report = svc.run()
+        self.assertEqual(report["imported"], 2)
+        self.assertEqual(report["skipped"], 2)
+        self.assertEqual(ClientOrderRaw.objects.count(), 2)
+
+    def test_run_default_import(self):
+        svc = OrderRawImportService(self.tmpfile.name, order_type="other")
+        report = svc.run()
+        self.assertEqual(report["imported"], 2)
+        self.assertEqual(report.get("skipped", 0), 2)
+        self.assertEqual(OrderRaw.objects.count(), 2)
+
+
+class OrderRawModelTests(TestCase):
+    def test_str_methods(self):
+        so = SupplierOrderRaw(source_file="f", sheet_name="S1", row_index=3, data={})
+        so.save()
+        self.assertEqual(str(so), f"RawSupplier #{so.id} – row {so.row_index}")
+
+        co = ClientOrderRaw(source_file="f", sheet_name="S2", row_index=5, data={})
+        co.save()
+        self.assertEqual(str(co), f"RawClient #{co.id} – row {co.row_index}")
+
+===== /home/smaug/piat/piat-tools/core/__init__.py =====
+
+===== /home/smaug/piat/piat-tools/core/apps.py =====
 from django.apps import AppConfig
 
 
@@ -2575,8 +2980,7 @@ class CoreConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'core'
 
-
-===== ./exchange_rate/services/fetch_and_store_rate.py =====
+===== /home/smaug/piat/piat-tools/exchange_rate/services/fetch_and_store_rate.py =====
 import requests
 from decimal import Decimal
 from datetime import date
@@ -2620,8 +3024,7 @@ def fetch_and_store_exchange_rate(target_date: date, base_currency="USD"):
         }
     )
 
-
-===== ./exchange_rate/services/conversion.py =====
+===== /home/smaug/piat/piat-tools/exchange_rate/services/conversion.py =====
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
@@ -2679,8 +3082,7 @@ def convert(amount, date, from_currency='THB', to_currency='USD') -> Decimal:
     return convert_from_usd(usd_amount, date, to_currency)
 
 
-
-===== ./exchange_rate/models.py =====
+===== /home/smaug/piat/piat-tools/exchange_rate/models.py =====
 from decimal import Decimal
 from django.db import models
 
@@ -2711,8 +3113,7 @@ class ExchangeRate(models.Model):
     def __str__(self):
         return f"{self.date} | 1 USD = {self.price} {self.base_currency}"
 
-
-===== ./exchange_rate/tools/parser.py =====
+===== /home/smaug/piat/piat-tools/exchange_rate/tools/parser.py =====
 from decimal import Decimal
 
 def parse_decimal(number):
@@ -2720,18 +3121,15 @@ def parse_decimal(number):
         return number
     return Decimal(str(number))
     
+===== /home/smaug/piat/piat-tools/exchange_rate/tools/__init__.py =====
 
-===== ./exchange_rate/tools/__init__.py =====
-
-
-===== ./exchange_rate/history_tools.py =====
+===== /home/smaug/piat/piat-tools/exchange_rate/history_tools.py =====
 import pandas
 
 
 def update_history():
     ...
-
-===== ./exchange_rate/tests/test_currency_conversion.py =====
+===== /home/smaug/piat/piat-tools/exchange_rate/tests/test_currency_conversion.py =====
 from decimal import Decimal
 from datetime import date
 
@@ -2800,11 +3198,9 @@ class CurrencyConversionTests(TestCase):
         with self.assertRaises(CurrencyConversionError):
             convert_to_usd(Decimal('1'), date(2025, 5, 1), from_currency='FOO')
 
+===== /home/smaug/piat/piat-tools/exchange_rate/tests/__init__.py =====
 
-===== ./exchange_rate/tests/__init__.py =====
-
-
-===== ./exchange_rate/tests/test_exchange_rate_uniqueness.py =====
+===== /home/smaug/piat/piat-tools/exchange_rate/tests/test_exchange_rate_uniqueness.py =====
 from decimal import Decimal
 from datetime import date
 
@@ -2879,8 +3275,7 @@ class ExchangeRateUniquenessTests(TestCase):
         self.assertEqual(other.date, date(2025, 5, 1))
         self.assertEqual(ExchangeRate.objects.count(), 2)
 
-
-===== ./exchange_rate/admin.py =====
+===== /home/smaug/piat/piat-tools/exchange_rate/admin.py =====
 from django.contrib import admin
 
 from exchange_rate.models import ExchangeRate
@@ -2890,10 +3285,7 @@ from exchange_rate.models import ExchangeRate
 class ExchangeRateAdmin(admin.ModelAdmin):
     list_display = ('date', 'base_currency', 'price', 'open', 'high', 'low', 'change_percent')
 
-
-===== ./exchange_rate/management/commands/delete_exchange_rate_db.py =====
-# core/management/commands/import_supplier_orders.py
-
+===== /home/smaug/piat/piat-tools/exchange_rate/management/commands/delete_exchange_rate_db.py =====
 from django.core.management.base import BaseCommand
 from exchange_rate.models import ExchangeRate
 
@@ -2906,8 +3298,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"[DONE] Supplier orders database has been cleared ({size} elements have been deleted)."))
         
 
-
-===== ./exchange_rate/management/commands/import_exchange_rates.py =====
+===== /home/smaug/piat/piat-tools/exchange_rate/management/commands/import_exchange_rates.py =====
 import csv
 from datetime import datetime
 from decimal import Decimal
@@ -2966,17 +3357,14 @@ class Command(BaseCommand):
                     self.stderr.write(f"Error on row {row}: {e}")
             self.stdout.write(f"Imported {count} exchange rate entries.")
 
-
-===== ./exchange_rate/views.py =====
+===== /home/smaug/piat/piat-tools/exchange_rate/views.py =====
 from django.shortcuts import render
 
 # Create your views here.
 
+===== /home/smaug/piat/piat-tools/exchange_rate/__init__.py =====
 
-===== ./exchange_rate/__init__.py =====
-
-
-===== ./exchange_rate/apps.py =====
+===== /home/smaug/piat/piat-tools/exchange_rate/apps.py =====
 from django.apps import AppConfig
 
 
@@ -2984,8 +3372,7 @@ class ExchangeRateConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'exchange_rate'
 
-
-===== ./PiatInventory/urls.py =====
+===== /home/smaug/piat/piat-tools/PiatInventory/urls.py =====
 """
 URL configuration for PiatInventory project.
 
@@ -3010,8 +3397,7 @@ urlpatterns = [
     path('', include("core.urls")),
 ]
 
-
-===== ./PiatInventory/wsgi.py =====
+===== /home/smaug/piat/piat-tools/PiatInventory/wsgi.py =====
 """
 WSGI config for PiatInventory project.
 
@@ -3029,8 +3415,7 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'PiatInventory.settings')
 
 application = get_wsgi_application()
 
-
-===== ./PiatInventory/settings.py =====
+===== /home/smaug/piat/piat-tools/PiatInventory/settings.py =====
 """
 Django settings for PiatInventory project.
 
@@ -3163,8 +3548,7 @@ STATIC_URL = '/static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-
-===== ./PiatInventory/asgi.py =====
+===== /home/smaug/piat/piat-tools/PiatInventory/asgi.py =====
 """
 ASGI config for PiatInventory project.
 
@@ -3182,11 +3566,9 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'PiatInventory.settings')
 
 application = get_asgi_application()
 
+===== /home/smaug/piat/piat-tools/PiatInventory/__init__.py =====
 
-===== ./PiatInventory/__init__.py =====
-
-
-===== ./manage.py =====
+===== /home/smaug/piat/piat-tools/manage.py =====
 #!/usr/bin/env python
 """Django's command-line utility for administrative tasks."""
 import os
@@ -3209,5 +3591,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
