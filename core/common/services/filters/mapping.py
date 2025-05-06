@@ -1,8 +1,10 @@
-from .base import BaseTransformFilter
+from core.common.services.filters.base import BaseTransformFilter
 
 from core.common.tools.row import get_value_mapped
 
 class FieldMappingFilter(BaseTransformFilter):
+    stage = BaseTransformFilter.FilterLevel.FIRST_STAGE
+
     def __init__(self, field_mapping):
         self.field_mapping = field_mapping
 

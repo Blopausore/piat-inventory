@@ -29,10 +29,10 @@ class Command(BaseCommand):
                 f"  orders created : {stats['orders_created']}\n"
                 f"  raws errors : {stats['raws_failed']}"
             ))
-            errors = list(sorted(stats['errors'].values(), key= lambda e: e[1], reverse=True))
+            errors = list(sorted(stats['errors'].values(), key= lambda e: e[0], reverse=True))
             self.stdout.write(self.style.ERROR("First 10 samples of errors\n"))
             for _, error in zip(range(10), errors):
-                self.stdout.write(self.style.ERROR(f"{error[1]} of {error[0]}\n"))
+                self.stdout.write(self.style.ERROR(f"Occured {error[0]} times | {error[1]}\n"))
 
         else:
             self.stdout.write(self.style.SUCCESS(
@@ -41,8 +41,8 @@ class Command(BaseCommand):
                 f"  orders created : {stats['orders_created']}\n"
                 f"  raws errors : {stats['raws_failed']}"
             ))
-            errors = list(sorted(stats['errors'].values(), key= lambda e: e[1], reverse=True))
+            errors = list(sorted(stats['errors'].values(), key= lambda e: e[0], reverse=True))
             self.stdout.write(self.style.WARNING("First 10 samples of errors\n"))
             for _, error in zip(range(10), errors):
-                self.stdout.write(self.style.WARNING(f"{error[1]} of {error[0]}\n"))
+                self.stdout.write(self.style.WARNING(f"Occured {error[0]} times | {error[1]}\n"))
 

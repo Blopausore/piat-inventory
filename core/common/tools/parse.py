@@ -54,9 +54,9 @@ def parse_date(value, expected_year=None):
 def parse_decimal(value, default=Decimal('0.0')):
     """Convert to Decimal safely. Return default if value is invalid."""
     if value is None:
-        return default
+        return None
     if isinstance(value, float) and math.isnan(value):
-        return default
+        return None
     try:
         if isinstance(value, str):
             value = ''.join(c for c in value if (c.isdigit() or c in '.-'))  # keep only digits, dot, minus
@@ -64,7 +64,7 @@ def parse_decimal(value, default=Decimal('0.0')):
             value = str(round(value, ndigits=5))
         return Decimal(value)
     except (InvalidOperation, ValueError):
-        return default
+        return None
 
 def parse_currency(raw: str) -> Currency:
     """

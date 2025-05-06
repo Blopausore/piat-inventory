@@ -52,7 +52,7 @@ from django.db import transaction
 
 from core.common.services.filters.mapping import FieldMappingFilter
 from core.common.services.filters.type_parsing import TypeParsingFilter
-from core.common.services.filters.context import TransformContext
+from core.common.services.filters.context import FilterContext
 from core.common.services.filters.canceled import CanceledFieldFilter
 from core.common.services.filters.required import RequiredFieldFilter
 
@@ -73,7 +73,7 @@ class OrderTransformer:
 
     def transform_one(self, raw):
         
-        ctx = TransformContext(raw, self.order_model)
+        ctx = FilterContext(raw, self.order_model)
         
         try:
             for filt in self.filters:
@@ -255,8 +255,9 @@ from core.common.tools.parse import (
 )
 
 def to_decimal(cleaned: str, field: models.DecimalField) -> Decimal:
-    """Nettoie, convertit et quantize selon field.decimal_places."""
     s = re.sub(r"[^\d\.\-]", "", cleaned)
+    if s == "":
+        raise ValueError(f"Decimal contains no number : {cleaned}")
     dec = Decimal(s or "0")
     quantum = Decimal("1").scaleb(-field.decimal_places)
     
@@ -296,49 +297,10 @@ class TypeParsingFilter(BaseTransformFilter):
             else:
                 ctx.attrs[field_name] = raw_val
         return True
-===== /home/smaug/piat/piat-tools/core/common/services/filters/fill_price.py =====
-
-from django.db import models
-from core.common.tools.parse import (
-    parse_int, parse_decimal, parse_date,
-)
-from .base import BaseTransformFilter
-
-class TypeParsingFilter(BaseTransformFilter):
-    """Sparse the value of the 'context'."""
-    def __init__(self, order_model):
-        self._opts = order_model._meta
-
-    def apply(self, ctx):
-        for field_name, raw_val in list(ctx.attrs.items()):
-            if raw_val is None:
-                continue
-
-            model_field = self._opts.get_field(field_name)
-
-            if isinstance(model_field, models.IntegerField):
-                ctx.attrs[field_name] = parse_int(raw_val)
-
-            # DecimalField
-            elif isinstance(model_field, models.DecimalField):
-                ctx.attrs[field_name] = parse_decimal(raw_val)
-
-            elif isinstance(model_field, (models.DateTimeField, models.DateField)):
-                ctx.attrs[field_name] = parse_date(raw_val)
-
-            # FloatField
-            elif isinstance(model_field, models.FloatField):
-                try:
-                    ctx.attrs[field_name] = float(raw_val)
-                except (TypeError, ValueError):
-                    ctx.attrs[field_name] = None
-            else:
-                ctx.attrs[field_name] = raw_val
-
 ===== /home/smaug/piat/piat-tools/core/common/services/filters/context.py =====
 from django.db.models import Field
 
-class TransformContext:
+class FilterContext:
     def __init__(self, raw, model_class):
         self.raw = raw
         self.order = None
@@ -381,7 +343,7 @@ class ValueFieldFilter(BaseTransformFilter):
 
 ===== /home/smaug/piat/piat-tools/core/common/services/filters/base.py =====
 from abc import ABC, abstractmethod
-from core.common.services.filters.context import TransformContext
+from core.common.services.filters.context import FilterContext
 
 
 class BaseTransformFilter(ABC):
@@ -392,9 +354,64 @@ class BaseTransformFilter(ABC):
     
     stage = 0
     @abstractmethod
-    def apply(self, ctx: TransformContext) -> bool:
+    def apply(self, ctx: FilterContext) -> bool:
         pass
 
+===== /home/smaug/piat/piat-tools/core/common/services/complete_field.py =====
+from django.db.models import F
+from django.db import transaction
+
+from core.common.services.filters.context import FilterContext
+from core.common.services.filters.canceled import CanceledFieldFilter
+from core.common.services.filters.required import RequiredFieldFilter
+
+from core.supplier_order.mapping import SUPPLIER_COLUMN_MAPPING, RAW_SUPPLIER_COLUMN_MAPPING
+
+
+class OrderTransformer:
+    def __init__(self, order_model, dry_run=False):
+        self.dry_run = dry_run
+
+    def transform_one(self, raw):
+        
+        ctx = FilterContext(raw, self.order_model)
+  
+
+    def run(self, queryset=None, batch_size=1000):
+        
+        orders_to_create = []
+        stats = {'total_raws': 0, 'orders_created': 0, 'raws_failed': 0, 'errors': {}}
+        key = {} # hash key to check doublon
+        for raw in queryset.iterator():
+            stats['total_raws'] += 1
+            ctx = self.transform_one(raw)
+
+            if ctx.error is None:
+                orders_to_create.append(ctx.order)
+                stats['orders_created'] += 1
+            else:
+                stats['raws_failed'] += 1
+                error_key = ctx.error[:40]
+                if not error_key in stats['errors'].keys():
+                    print(ctx.error)
+                    stats['errors'][error_key] = [f"{ctx.raw.sheet_name} - {ctx.raw.row_index} : {ctx.error}", 1]
+                else:
+                    stats['errors'][error_key][1] +=1
+
+            if len(orders_to_create) >= batch_size:
+                if not self.dry_run:
+                    with transaction.atomic():
+                        self.order_model.objects.bulk_create(
+                            orders_to_create, batch_size
+                        )
+                orders_to_create.clear()
+
+        if not self.dry_run and orders_to_create:
+            with transaction.atomic():
+                self.order_model.objects.bulk_create(
+                        orders_to_create, batch_size
+                    )
+        return stats
 ===== /home/smaug/piat/piat-tools/core/common/services/__init__.py =====
 
 ===== /home/smaug/piat/piat-tools/core/common/models.py =====
@@ -662,7 +679,6 @@ def parse_date(value, expected_year=None):
     """Safely parse a date value and make it timezone-aware if needed."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
-
     # Special handling if the value is a float (Excel day number)
     if isinstance(value, (float, int)):
         parsed = pd.to_datetime(value, origin='1899-12-30', unit='D', errors='coerce')
@@ -689,9 +705,9 @@ def parse_date(value, expected_year=None):
 def parse_decimal(value, default=Decimal('0.0')):
     """Convert to Decimal safely. Return default if value is invalid."""
     if value is None:
-        return default
+        return None
     if isinstance(value, float) and math.isnan(value):
-        return default
+        return None
     try:
         if isinstance(value, str):
             value = ''.join(c for c in value if (c.isdigit() or c in '.-'))  # keep only digits, dot, minus
@@ -699,8 +715,7 @@ def parse_decimal(value, default=Decimal('0.0')):
             value = str(round(value, ndigits=5))
         return Decimal(value)
     except (InvalidOperation, ValueError):
-        return default
-
+        return None
 
 def parse_currency(raw: str) -> Currency:
     """
@@ -776,13 +791,25 @@ def is_duplicate_object(obj, fields=None):
 
     filter_kwargs = {field: getattr(obj, field) for field in fields}
     return obj.__class__.objects.filter(**filter_kwargs).exists()
-===== /home/smaug/piat/piat-tools/core/common/management/commands/__init__.py =====
+===== /home/smaug/piat/piat-tools/core/common/tests/test_parse_errors.py =====
+# core/common/tests/test_parse_error_messages.py
 
-===== /home/smaug/piat/piat-tools/core/common/management/__init__.py =====
+from django.test import SimpleTestCase
+from core.common.tools.parse import parse_date, parse_unit
 
-===== /home/smaug/piat/piat-tools/core/common/__init__.py =====
+class ParseErrorMessagesTests(SimpleTestCase):
+    def test_parse_date_invalid_string(self):
+        with self.assertRaises(ValueError) as cm:
+            parse_date("31-02-2025")
 
-===== /home/smaug/piat/piat-tools/core/common/tests.py =====
+    def test_parse_date_none_returns_none(self):
+        self.assertIsNone(parse_date(None))
+
+    def test_parse_unit_unknown_raises_informative_error(self):
+        with self.assertRaises(ValueError) as cm:
+            parse_unit("XYZ")
+
+===== /home/smaug/piat/piat-tools/core/common/tests/test_parse_func.py =====
 import unittest
 import pandas as pd
 import numpy as np
@@ -811,7 +838,6 @@ class ParseIntTests(SimpleTestCase):
     def test_no_digits_returns_none(self):
         self.assertIsNone(parse_int('abc'))
 
-
 class ParseDecimalTests(SimpleTestCase):
     def test_string_input(self):
         self.assertEqual(parse_decimal('1.234'), Decimal('1.234'))
@@ -820,10 +846,10 @@ class ParseDecimalTests(SimpleTestCase):
         self.assertEqual(parse_decimal(3.21), Decimal('3.21'))
 
     def test_invalid_string_returns_default(self):
-        self.assertEqual(parse_decimal('abc'), Decimal('0.0'))
+        self.assertEqual(parse_decimal('abc'), None)
 
     def test_none_returns_default(self):
-        self.assertEqual(parse_decimal(None), Decimal('0.0'))
+        self.assertEqual(parse_decimal(None), None)
 
 
 class ParseDateTests(SimpleTestCase):
@@ -891,10 +917,6 @@ class ParseUnitTests(SimpleTestCase):
 
 
 class RowToolsTests(SimpleTestCase):
-    def test_get_value_mapped_returns_first_match(self):
-        row = {'A': 1, 'B': 2, 'C': 3}
-        mapping = {'field': {'B', 'C'}}
-        self.assertEqual(get_value_mapped(row, 'field', mapping), 2)
 
     def test_get_value_mapped_missing_returns_none(self):
         row = {'X': 5}
@@ -913,621 +935,13 @@ class RowToolsTests(SimpleTestCase):
 if __name__ == '__main__':
     unittest.main()
 
-===== /home/smaug/piat/piat-tools/core/tests/test_order_raw_import.py =====
-import os
-import tempfile
-from decimal import Decimal
-from datetime import datetime
-import pandas as pd
-import numpy as np
+===== /home/smaug/piat/piat-tools/core/common/tests/__init__.py =====
 
-from django.test import TestCase
-from core.services.imports.order_raw import OrderRawImportService
-from core.models.order_raw import OrderRaw, SupplierOrderRaw, ClientOrderRaw
+===== /home/smaug/piat/piat-tools/core/common/management/commands/__init__.py =====
 
-class OrderRawImportServiceTest(TestCase):
-    def setUp(self):
-        self.tmpfile = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
-        df1 = pd.DataFrame([
-            {"A": np.nan, "B": None},
-            {"A": 1,     "B": "foo"},
-        ])
-        df2 = pd.DataFrame([
-            {"X": 0, "Y": 0.0, "Z": ""},   
-            {"X": 5, "Y": 3.14, "Z": "bar"},
-        ])
-        with pd.ExcelWriter(self.tmpfile.name, engine="openpyxl") as writer:
-            df1.to_excel(writer, sheet_name="Feuille1", index=False)
-            df2.to_excel(writer, sheet_name="Feuille2", index=False)
-        self.tmpfile.close()
+===== /home/smaug/piat/piat-tools/core/common/management/__init__.py =====
 
-    def tearDown(self):
-        os.unlink(self.tmpfile.name)
-
-    def test_serialize_value(self):
-        svc = OrderRawImportService(self.tmpfile.name, order_type="supplier")
-        self.assertIsNone(svc._serialize_value(np.nan))
-        ts = pd.Timestamp("2025-05-02T13:45:00")
-        iso = svc._serialize_value(ts)
-        self.assertIsInstance(iso, str)
-        self.assertTrue(iso.startswith("2025-05-02T13:45"))
-        self.assertEqual(svc._serialize_value(np.int64(7)), 7)
-        self.assertEqual(svc._serialize_value("abc"), "abc")
-        self.assertEqual(svc._serialize_value(3.21), 3.21)
-
-    def test_has_meaningful_data(self):
-        svc = OrderRawImportService(self.tmpfile.name, order_type="client")
-        self.assertFalse(svc._has_meaningful_data({
-            "a": None, "b": "", "c": 0, "d": 0.0
-        }))
-        self.assertTrue(svc._has_meaningful_data({
-            "a": None, "b": "", "c": 1, "d": 0.0
-        }))
-
-    def test_run_creates_and_skips(self):
-        svc = OrderRawImportService(self.tmpfile.name, order_type="supplier")
-        report = svc.run()
-        self.assertEqual(report["imported"], 2)
-        self.assertEqual(report["skipped"], 2)
-        self.assertEqual(SupplierOrderRaw.objects.count(), 2)
-        raws = list(SupplierOrderRaw.objects.order_by("row_index"))
-        self.assertEqual(raws[0].sheet_name, "Feuille1")
-        self.assertEqual(raws[1].sheet_name, "Feuille2")
-
-        # svc_cli = OrderRawImportService(self.tmpfile.name, order_type="client")
-        # report_cli = svc_cli.run()
-        # self.assertEqual(report_cli["imported"], 2)
-        # self.assertEqual(ClientOrderRaw.objects.count(), 2)
-
-    def test_default_order_model(self):
-        svc = OrderRawImportService(self.tmpfile.name, order_type="other")
-        report = svc.run()
-        self.assertEqual(report["imported"], 2)
-        self.assertEqual(OrderRaw.objects.count(), 2)
-
-===== /home/smaug/piat/piat-tools/core/tests/test_supplier_order.py =====
-import io
-import warnings
-
-from datetime import datetime
-import pandas as pd
-
-from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, Client
-from django.urls import reverse
-
-from core.models import SupplierOrder
-
-class SupplierOrderTests(TestCase):
-    def setUp(self):
-        warnings.filterwarnings("ignore", category=RuntimeWarning, message="DateTimeField .* received a naive datetime")
-  
-        self.client = Client()
-        self.order = SupplierOrder.objects.create(
-            client_memo="P",
-            date=datetime(2024, 1, 10),
-            book_no=86,
-            order_no=4280,
-            tax_invoice="072/3566",
-            supplier="Kstone",
-            number=5,
-            stone="Ruby",
-            heating="H",
-            color="Red",
-            shape="Oct",
-            size="6x4",
-            carats=2.97,
-            currency="THB",
-            price_cur_per_unit=7000,
-            unit="CT",
-            total_thb=20790,
-            weight_per_piece=0.59,
-            price_usd_per_ct=200,
-            price_usd_per_piece=118.8,
-            total_usd=611.47,
-            rate_avg_2019=48.29,
-            remarks="Tiffany",
-            credit_term="2 months",
-            target_size="6x4"
-        )
-
-    def test_json_view_returns_data(self):
-        response = self.client.get(reverse("supplier_orders_json"))
-        self.assertEqual(response.status_code, 200)
-        json_data = response.json()
-        self.assertGreater(json_data["recordsTotal"], 0)
-        self.assertGreater(len(json_data["data"]), 0)
-
-    def test_export_excel_content(self):
-        response = self.client.get(reverse("supplier_orders_export"))
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", response["Content-Type"])
-        df = pd.read_excel(io.BytesIO(response.content))
-        self.assertFalse(df.empty)
-        self.assertIn("Stone", df.columns)
-
-    def test_update_field_successfully(self):
-        response = self.client.post(reverse("supplier_order_update"), {
-            "order_id": self.order.id,
-            "field_index": 6,  # index of "stone" if ordering is kept
-            "new_value": "Sapphire",
-            "csrfmiddlewaretoken": "dummy"
-        })
-        self.assertEqual(response.status_code, 200)
-        self.order.refresh_from_db()
-        self.assertEqual(self.order.stone, "Sapphire")
-
-    def test_import_from_excel(self):
-        df = pd.DataFrame([{
-            "Date": "2024-03-13",
-            "Book No.": 86,
-            "No.": 4281,
-            "TAX INVOICE": "072/9999",
-            "CLIENT": "TestSupplier",
-            "PC": 3,
-            "Stone": "Sapphire",
-            "H/NH": "NH",
-            "Color": "Blue",
-            "Shape": "Oct",
-            "Size": "5x4",
-            "Carats": 1.20,
-            "US/THB": "THB",
-            "price": 7000,
-            "PER": "CT",
-            "Total": 8400,
-            "Weight per piece": 0.40,
-            "price $/ct ": 200,
-            "price/$ per piece": 80,
-            "Total $": 247.06,
-            "Rate $ average 2019": 48.29,
-            "Remarks": "Tiffany",
-            "CREDIT TERM": "2 months",
-            "Target size": "5x4"
-        }])
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False)
-        buffer.seek(0)
-        upload = SimpleUploadedFile("test_import.xlsx", buffer.read(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        response = self.client.post(reverse("supplier_orders_import_upload"), {'file': upload})
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(SupplierOrder.objects.count(), 2)
-
-
-    def test_import_duplicate_rows_in_same_sheet(self):
-        """
-        When importing a sheet that contains two identical rows,
-        only one new SupplierOrder should be created.
-        """
-        initial_count = SupplierOrder.objects.count()
-
-        # Prepare two identical rows
-        row = {
-            "Date": "2024-03-13",
-            "Book No.": 86,
-            "No.": 4282,
-            "TAX INVOICE": "072/7777",
-            "CLIENT": "DupSupplier",
-            "PC": 2,
-            "Stone": "Emerald",
-            "H/NH": "NH",
-            "Color": "Green",
-            "Shape": "Oval",
-            "Size": "7x5",
-            "Carats": 1.50,
-            "US/THB": "THB",
-            "price": 8000,
-            "PER": "CT",
-            "Total": 12000,
-            "Weight per piece": 0.75,
-            "price $/ct ": 200,
-            "price/$ per piece": 150,
-            "Total $": 300.00,
-            "Rate $ average 2019": 48.50,
-            "Remarks": "Test",
-            "CREDIT TERM": "1 month",
-            "Target size": "7x5"
-        }
-        df = pd.DataFrame([row, row])  # duplicate rows
-
-        # Write to Excel buffer
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False)
-        buffer.seek(0)
-
-        upload = SimpleUploadedFile(
-            "dup_test.xlsx",
-            buffer.read(),
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-        # Perform import via the upload view
-        response = self.client.post(
-            reverse("supplier_orders_import_upload"),
-            {'file': upload}
-        )
-        self.assertEqual(response.status_code, 302)
-
-        # Only one new record should have been added
-        final_count = SupplierOrder.objects.count()
-        self.assertEqual(final_count, initial_count + 1)
-===== /home/smaug/piat/piat-tools/core/tests/test_filters.py =====
-from decimal import Decimal
-from datetime import datetime
-
-from django.db import models
-from django.test import SimpleTestCase
-from django.test.utils import isolate_apps
-
-from core.services.filters.context import TransformContext
-from core.services.filters.mapping import FieldMappingFilter
-from core.services.filters.type_parsing import TypeParsingFilter
-from core.services.filters.validity import RequiredFieldFilter
-from core.models.order_raw import OrderRaw
-
-@isolate_apps("core")
-class FieldMappingFilterTest(SimpleTestCase):
-    
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        class OrderTest(models.Model):
-            class Meta:
-                app_label = 'core'  # pas de migration réelle
-            book_no               = models.CharField(max_length=50)
-            date                  = models.DateTimeField()
-            order_no              = models.CharField(max_length=50)
-            supplier              = models.CharField(max_length=50)
-            number                = models.IntegerField()
-            stone                 = models.CharField(max_length=50)
-            price_usd_per_piece   = models.DecimalField(max_digits=10, decimal_places=2)
-            total_usd             = models.DecimalField(max_digits=10, decimal_places=2)
-        cls.TestModel = OrderTest
-        
-    def setUp(self):
-        self.order_mapping = {
-                'date':                 ['Date'],
-                'book_no':              ['Book No.', 'Book No'],
-                'order_no':             ['No.', 'Order No', 'No'],
-                'supplier':             ['CLIENT', 'Client', 'Supplier'],
-                'number':               ['PC', 'Pieces', 'Qty'],
-                'stone':                ['Stone', '  Stone'],
-                'price_usd_per_piece':  ['price/$ per piece', 'Price/$ per Piece'],
-                'total_usd':            ['Total $', 'USD Total'],
-                
-        }
-        
-    def test_mapping_filter_picks_correct_columns(self):
-        raw = {
-            'Book No.': '123',
-            'Date': '2025-05-02T15:30:00',
-            'Supplier': 'GemCo'
-        }
-    
-        ctx = TransformContext(raw, self.TestModel)
-        filt = FieldMappingFilter(field_mapping=self.order_mapping)
-        filt.apply(ctx)
-        self.assertEqual(ctx.attrs['book_no'], '123')
-        self.assertEqual(ctx.attrs['date'], '2025-05-02T15:30:00')
-        self.assertEqual(ctx.attrs['supplier'], 'GemCo')
-
-    def test_mapping_filter_with_alternatives(self):
-        raw = { 'No.': '456', 'Order No': '789' }
-        ctx = TransformContext(raw, self.TestModel)
-        filt = FieldMappingFilter(field_mapping=self.order_mapping)
-        filt.apply(ctx)
-        self.assertEqual(ctx.attrs['order_no'], '456')
-
-
-@isolate_apps("core")
-class TypeParsingFilterTest(SimpleTestCase):
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        class OrderTest(models.Model):
-            class Meta:
-                app_label = 'core' 
-            book_no               = models.CharField(max_length=50)
-            date                  = models.DateTimeField()
-            order_no              = models.CharField(max_length=50)
-            supplier              = models.CharField(max_length=50)
-            number                = models.IntegerField()
-            stone                 = models.CharField(max_length=50)
-            price_usd_per_piece   = models.DecimalField(max_digits=10, decimal_places=2)
-            total_usd             = models.DecimalField(max_digits=10, decimal_places=2)
-        cls.TestModel = OrderTest
-
-    def setUp(self):
-        self.ctx = TransformContext({}, self.TestModel)
-        self.parser = TypeParsingFilter()
-
-    def test_parse_int_and_decimal_and_date(self):
-        self.ctx.attrs['book_no'] = '42'
-        self.ctx.attrs['carats'] = '1.234'
-        self.ctx.attrs['date'] = '2025-01-01'
-        self.parser.apply(self.ctx)
-        # int
-        self.assertIsInstance(self.ctx.attrs['book_no'], int)
-        self.assertEqual(self.ctx.attrs['book_no'], 42)
-        # Decimal
-        self.assertIsInstance(self.ctx.attrs['carats'], Decimal)
-        self.assertEqual(str(self.ctx.attrs['carats']), '1.234')
-        # DateTimeField → datetime
-        self.assertIsInstance(self.ctx.attrs['date'], datetime)
-        self.assertEqual(self.ctx.attrs['date'].date(), datetime(2025, 1, 1).date())
-
-@isolate_apps('core')
-class RequiredFieldFilterTest(SimpleTestCase):
-    
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        class OrderTest(models.Model):
-            class Meta:
-                app_label = 'core'  # pas de migration réelle
-                unique_together = ('date','supplier','order_no')
-                constraints = [
-                models.UniqueConstraint(
-                    fields=list(('date','supplier','order_no')),
-                    name='unique_supplier_lot'
-                )
-        ]
-            book_no               = models.CharField(max_length=50, blank=True, null=True)
-            date                  = models.DateTimeField()
-            order_no              = models.CharField(max_length=50)
-            supplier              = models.CharField(max_length=50)
-            number                = models.IntegerField(blank=True, null=True)
-            stone                 = models.CharField(max_length=50, blank=True, null=True)
-            price_usd_per_piece   = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-            total_usd             = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-        cls.TestModel = OrderTest
-    
-    def setUp(self):
-        self.ctx = TransformContext({}, self.TestModel)
-        self.filt = RequiredFieldFilter()
-
-    def test_missing_required_fields(self):
-        ok = self.filt.apply(self.ctx)
-        self.assertFalse(ok)
-        self.assertIn('date', self.ctx.error)
-        self.assertIn('supplier', self.ctx.error)   
-
-    def test_all_required_present(self):
-        for f in ['date','supplier','order_no']:
-            self.ctx.attrs[f] = 'dummy'
-        ok = self.filt.apply(self.ctx)
-        self.assertTrue(ok)
-        self.assertIsNone(self.ctx.error)
-
-
-===== /home/smaug/piat/piat-tools/core/tests/test_order_pricing.py =====
-from decimal import Decimal
-from datetime import date
-
-from django.test import TestCase
-from exchange_rate.models import ExchangeRate
-from core.models.supplier_order import SupplierOrder
-from core.services.tools.order_pricing import MissingPriceFiller
-from exchange_rate.services.conversion import CurrencyConversionError
-
-class MissingPriceFillerTests(TestCase):
-    def setUp(self):
-        # Define a fictional currency IMC: 1 USD = 2 IMC
-        ExchangeRate.objects.create(
-            base_currency='IMC',
-            date=date(2025, 5, 1),
-            price=Decimal('2.0000'),
-            open=Decimal('1.9000'),
-            high=Decimal('2.1000'),
-            low=Decimal('1.8000'),
-            change_percent='0.00%'
-        )
-
-    def make_order(self, **kwargs):
-        defaults = {
-            'client_memo': 'P',
-            'date': date(2025, 5, 1),
-            'book_no': 1,
-            'order_no': 100,
-            'tax_invoice': 'T1',
-            'supplier': 'ImaginarySup',
-            'number': 1,
-            'stone': 'FictionStone',
-            'heating': None,
-            'color': None,
-            'shape': None,
-            'size': None,
-            'carats': Decimal('1.00'),
-            'currency': 'IMC',
-            'price_cur_per_unit': Decimal('10.00'),
-            'unit': 'CT',
-            'total_thb': Decimal('10.00'),
-            'weight_per_piece': Decimal('0.50'),
-            'price_usd_per_ct': None,
-            'price_usd_per_piece': None,
-            'total_usd': None,
-            'rate_avg_2019': None,
-            'remarks': '',
-            'credit_term': '',
-            'target_size': '',
-        }
-        defaults.update(kwargs)
-        return SupplierOrder.objects.create(**defaults)
-
-    def test_fill_single_order_imc(self):
-        order = self.make_order(
-            price_cur_per_unit=Decimal('10.00'),
-            carats=Decimal('2.00'),
-            weight_per_piece=Decimal('0.25'),
-            currency='IMC',
-        )
-        service = MissingPriceFiller(dry_run=False, verbose=False)
-        report = service.run()
-
-        # Should process one order and update it
-        self.assertEqual(report['to_update'], 1)
-        self.assertEqual(report['updated'], 1)
-        self.assertEqual(report['errors'], [])
-
-        order.refresh_from_db()
-        # price_usd_per_ct = 10 IMC → 5 USD
-        self.assertEqual(order.price_usd_per_ct, Decimal('5.00'))
-        # price_usd_per_piece = 5.00 * 0.25 = 1.25
-        self.assertEqual(order.price_usd_per_piece, Decimal('1.25'))
-        # total_usd = 5.00 * 2.00 = 10.00
-        self.assertEqual(order.total_usd, Decimal('10.00'))
-
-    def test_fill_single_order_usd(self):
-        # Even with fictional currency, USD orders pass-through
-        order = self.make_order(
-            price_cur_per_unit=Decimal('7.00'),
-            carats=Decimal('3.00'),
-            weight_per_piece=Decimal('1.00'),
-            currency='USD',
-        )
-        service = MissingPriceFiller(dry_run=False, verbose=False)
-        report = service.run()
-
-        self.assertEqual(report['to_update'], 1)
-        self.assertEqual(report['updated'], 1)
-        self.assertEqual(report['errors'], [])
-
-        order.refresh_from_db()
-        self.assertEqual(order.price_usd_per_ct, Decimal('7.00'))
-        self.assertEqual(order.price_usd_per_piece, Decimal('7.00'))
-        self.assertEqual(order.total_usd, Decimal('21.00'))
-
-    def test_dry_run_does_not_persist(self):
-        order = self.make_order(price_cur_per_unit=Decimal('8.00'))
-        service = MissingPriceFiller(dry_run=True, verbose=False)
-        report = service.run()
-
-        self.assertEqual(report['to_update'], 1)
-        self.assertEqual(report['updated'], 1)
-
-        order.refresh_from_db()
-        self.assertIsNone(order.price_usd_per_ct)
-        self.assertIsNone(order.total_usd)
-
-    def test_missing_rate_reports_error(self):
-        order = self.make_order(currency='FOO', price_cur_per_unit=Decimal('5.00'))
-        service = MissingPriceFiller(dry_run=False, verbose=True)
-        report = service.run()
-
-        self.assertEqual(report['to_update'], 1)
-        self.assertEqual(report['updated'], 0)
-        self.assertEqual(len(report['errors']), 1)
-        err = report['errors'][0]
-        self.assertEqual(err['order_id'], order.id)
-        self.assertIn('No exchange rate available', err['error'])
-
-===== /home/smaug/piat/piat-tools/core/tests/test_price_filling.py =====
-import unittest
-from decimal import Decimal
-from django.test import TestCase
-from core.common.tools.parse import parse_unit
-from core.services.tools.order_pricing import MissingPriceFiller
-from core.models.supplier_order import SupplierOrder
-from django.utils import timezone
-from exchange_rate.models import ExchangeRate
-
-class ParseUnitTests(TestCase):
-    def test_parse_unit_carat_variants(self):
-        for raw in ['CT', 'Ct', 'ct']:
-            self.assertEqual(parse_unit(raw), 'CT')
-
-    def test_parse_unit_piece_variants(self):
-        for raw in ['PC', 'Pc', 'p', 'P', 'pc']:
-            self.assertEqual(parse_unit(raw), 'PC')
-
-    def test_parse_unit_gram_variants(self):
-        for raw in ['G', 'Gram', 'g']:
-            self.assertEqual(parse_unit(raw), 'G')
-
-    def test_parse_unit_kg_variants(self):
-        for raw in ['KG', 'kg', 'Kg']:
-            self.assertEqual(parse_unit(raw), 'KG')
-
-    def test_parse_unit_total_variants(self):
-        for raw in ['T', 'TOTAL', 'total', 'lot']:
-            self.assertEqual(parse_unit(raw), 'TOTAL')
-
-    def test_parse_unit_unknown_raises(self):
-        with self.assertRaises(ValueError):
-            parse_unit('unknown')
-
-class MissingPriceFillerTests(TestCase):
-    def setUp(self):
-        # create USD rate stub (not used for USD conversion)
-        ExchangeRate.objects.create(
-            base_currency='THB', date=timezone.now().date(),
-            price=Decimal('40.0000'), open=Decimal('39'), high=Decimal('41'), low=Decimal('38'), change_percent=None
-        )
-        self.filler = MissingPriceFiller(dry_run=False, verbose=False)
-
-    def make_order(self, **kwargs):
-        defaults = {
-            'unit': 'CT', 'currency': 'USD', 'price_cur_per_unit': Decimal('10.00'),
-            'weight_per_piece': Decimal('0.50'), 'carats': Decimal('1.00'),
-            'date': timezone.now(), 'client_memo': 'P', 'book_no': 1, 'order_no': 1,
-            'supplier': 'Test', 'number': 1, 'stone': 'TestStone', 'heating': None,
-            'color': None, 'shape': None, 'size': None,
-            'total_thb': Decimal('10.00'), 'price_usd_per_ct': None,
-            'price_usd_per_piece': None, 'total_usd': None, 'rate_avg_2019': None,
-            'remarks': '', 'credit_term': '', 'target_size': ''
-        }
-        defaults.update(kwargs)
-        return SupplierOrder(**defaults)
-
-    def test_normalize_local_price_ct(self):
-        order = self.make_order(unit='ct', price_cur_per_unit=Decimal('5.00'))
-        per_ct = self.filler._normalize_local_price(order)
-        self.assertEqual(per_ct, Decimal('5.00'))
-
-    def test_normalize_local_price_pc(self):
-        order = self.make_order(unit='pc', price_cur_per_unit=Decimal('10.00'), weight_per_piece=Decimal('2.00'))
-        per_ct = self.filler._normalize_local_price(order)
-        self.assertEqual(per_ct, Decimal('5.00'))
-
-    def test_normalize_local_price_total(self):
-        order = self.make_order(unit='TOTAL', price_cur_per_unit=Decimal('20.00'), carats=Decimal('4.00'))
-        per_ct = self.filler._normalize_local_price(order)
-        self.assertEqual(per_ct, Decimal('5.00'))
-
-    def test_normalize_local_price_gram(self):
-        order = self.make_order(unit='g', price_cur_per_unit=Decimal('100.00'))
-        per_ct = self.filler._normalize_local_price(order)
-        # 100 per gram → per carat: 100 * 0.2 = 20.00
-        self.assertEqual(per_ct, Decimal('20.00'))
-
-    def test_normalize_local_price_kg(self):
-        order = self.make_order(unit='kg', price_cur_per_unit=Decimal('1000.00'))
-        # 1000 per kg → per gram: 1000/1000=1 → per carat: 1*0.2=0.20
-        per_ct = self.filler._normalize_local_price(order)
-        self.assertEqual(per_ct, Decimal('0.20'))
-
-    def test_fill_order_usd(self):
-        order = self.make_order(unit='PC', price_cur_per_unit=Decimal('10.00'), weight_per_piece=Decimal('2.00'))
-        self.filler._fill_order(order)
-        # local per ct = 5, USD per ct = 5, per piece = 5*2=10, total_usd = 5*1=5
-        self.assertEqual(order.price_usd_per_ct, Decimal('5.00'))
-        self.assertEqual(order.price_usd_per_piece, Decimal('10.00'))
-        self.assertEqual(order.total_usd, Decimal('5.00'))
-
-    def test_fill_order_non_usd(self):
-        # Use THB currency with rate 40 THB = 1 USD → 1 THB = 0.025 USD
-        order = self.make_order(unit='CT', price_cur_per_unit=Decimal('40.00'), currency='THB')
-        self.filler._fill_order(order)
-        # local per ct =40 → usd per ct =1.00, per piece & total
-        self.assertEqual(order.price_usd_per_ct, Decimal('1.00'))
-        self.assertEqual(order.price_usd_per_piece, Decimal('0.50'))
-        self.assertEqual(order.total_usd, Decimal('1.00'))
-
-if __name__ == '__main__':
-    unittest.main()
-
-===== /home/smaug/piat/piat-tools/core/tests/__init__.py =====
+===== /home/smaug/piat/piat-tools/core/common/__init__.py =====
 
 ===== /home/smaug/piat/piat-tools/core/admin.py =====
 from django.contrib import admin
@@ -1595,16 +1009,15 @@ from django.db import transaction
 
 from core.common.services.filters.mapping import FieldMappingFilter
 from core.common.services.filters.type_parsing import TypeParsingFilter
-from core.common.services.filters.context import TransformContext
+from core.common.services.filters.context import FilterContext
 from core.common.services.filters.canceled import CanceledFieldFilter
 from core.common.services.filters.required import RequiredFieldFilter
 
-from core.order_raw.models import SupplierOrderRaw
 from core.supplier_order.models import SupplierOrder
 from core.supplier_order.mapping import SUPPLIER_COLUMN_MAPPING, RAW_SUPPLIER_COLUMN_MAPPING
 from core.supplier_order.services.filters.is_purchase import IsPurchaseFilter
 
-class SupplierContext(TransformContext):
+class SupplierContext(FilterContext):
     """
     Contexte de transformation pour SupplierOrder, avec les champs attendus dans `attrs`.
     """
@@ -1629,7 +1042,7 @@ class SupplierOrderTransformer:
             self.unique_fields = []
 
     def transform_one(self, raw):
-        ctx = TransformContext(raw, SupplierOrder)
+        ctx = FilterContext(raw, SupplierOrder)
         try:
             for filt in self.filters:
                 if not filt.apply(ctx):
@@ -1640,38 +1053,51 @@ class SupplierOrderTransformer:
             ctx.error = str(e)
         return ctx
 
-    def run(self, queryset=None, batch_size=1000):
+    def _manage_new_error(self, ctx, reports, error_key_lenght):
+        error_key = ctx.error[:error_key_lenght]
+        if error_key not in reports['errors']:
+            reports['errors'][error_key] = [1, f"Sheet {ctx.raw.sheet_name} - Index {ctx.raw.row_index} : {ctx.error}"]
+        else:
+            reports['errors'][error_key][0] += 1
+
+    def run(self, queryset=None, batch_size=1000, error_key_lenght=40):
+        """
+
+        Args:
+            queryset (_type_, optional): Iterable of SupplierOrderRaw. Defaults to None.
+            batch_size (int, optional): Size of the batch for saving bucket. Defaults to 1000.
+            error_ket_lenght (int, optional): Key lenght for report message error : big implies mores keys. Defaults to 40.
+
+        Returns:
+            reports (dict) : A report of the transfer
+        """
         orders_to_create = []
-        stats = {
+        reports = {
             'total_raws': 0,
             'orders_created': 0,
             'raws_failed': 0,
-            'skipped_duplicates': 0,
             'errors': {}
         }
         seen_keys = set()
 
         for raw in queryset.iterator():
-            stats['total_raws'] += 1
+            reports['total_raws'] += 1
             ctx = self.transform_one(raw)
 
             if ctx.error is None:
                 # Construction de la clé de doublon depuis les champs uniques
                 key = tuple(getattr(ctx.order, f) for f in self.unique_fields)
                 if key in seen_keys:
-                    stats['skipped_duplicates'] += 1
+                    ctx.error = f"Duplicated row : {key}"
+                    self._manage_new_error(ctx, reports, error_key_lenght)
+                    reports['raws_failed'] += 1
                 else:
                     seen_keys.add(key)
                     orders_to_create.append(ctx.order)
-                    stats['orders_created'] += 1
+                    reports['orders_created'] += 1
             else:
-                stats['raws_failed'] += 1
-                error_key = ctx.error[:40]
-                if error_key not in stats['errors']:
-                    stats['errors'][error_key] = [f"{ctx.raw.sheet_name} - {ctx.raw.row_index} : {ctx.error}", 1]
-                else:
-                    stats['errors'][error_key][1] += 1
-
+                reports['raws_failed'] += 1
+                self._manage_new_error(ctx, reports, error_key_lenght)
             # Bulk insert par batch
             if len(orders_to_create) >= batch_size:
                 if not self.dry_run:
@@ -1684,7 +1110,7 @@ class SupplierOrderTransformer:
             with transaction.atomic():
                 SupplierOrder.objects.bulk_create(orders_to_create, batch_size)
 
-        return stats
+        return reports
 
 ===== /home/smaug/piat/piat-tools/core/supplier_order/services/exports.py =====
 import openpyxl
@@ -2184,10 +1610,12 @@ from core.supplier_order.models import SupplierOrder
 class TransformErrorAndDuplicateTests(TestCase):
     def setUp(self):
         # un raw valide minimal pour pouvoir échouer sur date ou carats
+        self._counter = 0
         base = {
             'Client Memo': 'P',
             'No.': '1',
-            'DATE': '2025-05-06',
+            'Date': '2025-05-06',
+            'Client': 'TEST#!#!',
             'Stone': 'Ruby',
             'PC': '2',
             'Carats': '1.00',
@@ -2196,21 +1624,27 @@ class TransformErrorAndDuplicateTests(TestCase):
 
     def make_raw(self, overrides):
         data = {**self.valid_payload, **overrides}
+        idx = self._counter
+        self._counter +=1
         return SupplierOrderRaw.objects.create(
-            source_file='f.xlsx', sheet_name='S1', row_index=0, data=data
+            source_file='f.xlsx', sheet_name='S1', row_index=idx, data=data
         )
 
     def test_should_fail_on_invalid_date_in_transform(self):
-        raw = self.make_raw({'DATE': '06/05/2025'})
+        raw = self.make_raw({'Date': '06/05/2025'})
+        stats = SupplierOrderTransformer(dry_run=True).run(
+            queryset=SupplierOrderRaw.objects.filter(id=raw.id)
+        )
+        self.assertEqual(stats['orders_created'], 1)
+        self.assertEqual(stats['raws_failed'], 0)
+        # message d'erreur date présent
+        raw = self.make_raw({'Date': '13/13/2000'})
         stats = SupplierOrderTransformer(dry_run=True).run(
             queryset=SupplierOrderRaw.objects.filter(id=raw.id)
         )
         self.assertEqual(stats['orders_created'], 0)
         self.assertGreater(stats['raws_failed'], 0)
-        # message d'erreur date présent
-        err_keys = list(stats['errors'].keys())
-        self.assertTrue(any("Invalid date format" in k for k in err_keys))
-
+        
     def test_should_fail_on_invalid_carats_in_transform(self):
         raw = self.make_raw({'Carats': 'abc'})
         stats = SupplierOrderTransformer(dry_run=True).run(
@@ -2234,13 +1668,15 @@ class TransformErrorAndDuplicateTests(TestCase):
         # créer deux raws identiques
         raw1 = self.make_raw({'No.': '10', 'DATE': '2025-05-06'})
         raw2 = self.make_raw({'No.': '10', 'DATE': '2025-05-06'})
+        raw1.data["row_index"] = 66
+        raw2.data["row_index"] = 67
         # 1er passage crée un order
         t = SupplierOrderTransformer(dry_run=False)
         stats1 = t.run(queryset=SupplierOrderRaw.objects.filter(id=raw1.id))
         self.assertEqual(stats1['orders_created'], 1)
         # 2e passage, même données => bulk_create ignore & clean() rejette
         stats2 = t.run(queryset=SupplierOrderRaw.objects.filter(id=raw2.id))
-        self.assertEqual(stats2['skipped_duplicates'], 1)
+        self.assertEqual(stats2['raws_failed'], 1)
         self.assertEqual(stats2['orders_created'], 0)
 
 ===== /home/smaug/piat/piat-tools/core/supplier_order/tests/__init__.py =====
@@ -2611,10 +2047,10 @@ class Command(BaseCommand):
                 f"  orders created : {stats['orders_created']}\n"
                 f"  raws errors : {stats['raws_failed']}"
             ))
-            errors = list(sorted(stats['errors'].values(), key= lambda e: e[1], reverse=True))
+            errors = list(sorted(stats['errors'].values(), key= lambda e: e[0], reverse=True))
             self.stdout.write(self.style.ERROR("First 10 samples of errors\n"))
             for _, error in zip(range(10), errors):
-                self.stdout.write(self.style.ERROR(f"{error[1]} of {error[0]}\n"))
+                self.stdout.write(self.style.ERROR(f"Occured {error[0]} times | {error[1]}\n"))
 
         else:
             self.stdout.write(self.style.SUCCESS(
@@ -2623,10 +2059,10 @@ class Command(BaseCommand):
                 f"  orders created : {stats['orders_created']}\n"
                 f"  raws errors : {stats['raws_failed']}"
             ))
-            errors = list(sorted(stats['errors'].values(), key= lambda e: e[1], reverse=True))
+            errors = list(sorted(stats['errors'].values(), key= lambda e: e[0], reverse=True))
             self.stdout.write(self.style.WARNING("First 10 samples of errors\n"))
             for _, error in zip(range(10), errors):
-                self.stdout.write(self.style.WARNING(f"{error[1]} of {error[0]}\n"))
+                self.stdout.write(self.style.WARNING(f"Occured {error[0]} times | {error[1]}\n"))
 
 
 ===== /home/smaug/piat/piat-tools/core/management/commands/import_raw.py =====
@@ -2783,6 +2219,7 @@ class OrderRawImportService:
                 return True
         return False
     
+    
     def run(self) -> dict:
         report = {'imported': 0, 'skipped': 0, 'failed': []}
         sheets = pd.read_excel(self.file_path, sheet_name=None)
@@ -2903,13 +2340,15 @@ class OrderRawImportServiceTests(TestCase):
         # Create a temporary Excel file with two sheets
         self.tmpfile = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
         df1 = pd.DataFrame([
-            {"A": np.nan, "B": None},
-            {"A": 1,     "B": "foo"},
+            {"A": np.nan, "B": None}, # Invalid
+            {"A": 1,     "B": "foo"}, # Invalid
         ])
         df2 = pd.DataFrame([
-            {"X": 0, "Y": 0.0, "Z": ""},   
-            {"X": 5, "Y": 3.14, "Z": "bar"},
+            {"X": 5.01, "Y": 3.14, "Z": "bar"}, # Valid
+            {"X": 5.02, "Y": 3.14, "Z": "bar"}, # Valid
         ])
+        # 2 valid | 2 skipped
+        
         with pd.ExcelWriter(self.tmpfile.name, engine="openpyxl") as writer:
             df1.to_excel(writer, sheet_name="Sheet1", index=False)
             df2.to_excel(writer, sheet_name="Sheet2", index=False)
@@ -2922,10 +2361,7 @@ class OrderRawImportServiceTests(TestCase):
         svc = OrderRawImportService(self.tmpfile.name, order_type="supplier")
         # NaN -> empty
         self.assertEqual(svc._serialize_value(np.nan), "")
-        # Timestamp -> ISO string
-        ts = pd.Timestamp("2025-05-02T13:45:00")
-        iso = svc._serialize_value(ts)
-        self.assertTrue(isinstance(iso, str) and iso.startswith("2025-05-02T13:45"))
+        
         # Numeric types -> str
         self.assertEqual(svc._serialize_value(np.int64(7)), "7")
         self.assertEqual(svc._serialize_value("abc"), "abc")
@@ -2934,9 +2370,10 @@ class OrderRawImportServiceTests(TestCase):
     def test_has_meaningful_data(self):
         svc = OrderRawImportService(self.tmpfile.name, order_type="client")
         # All empty or zeros -> False
-        self.assertFalse(svc._has_meaningful_data({"a": None, "b": "", "c": 0, "d": 0.0}))
+        self.assertFalse(svc._has_meaningful_data({"a": None, "b": "1", "c": 0, "d": 0.0}))
         # One non-zero -> True
-        self.assertTrue(svc._has_meaningful_data({"a": None, "b": "", "c": 1, "d": 0.0}))
+        self.assertTrue(svc._has_meaningful_data({"a": "SomeOneReallyImportant", "b": "HaveOrder", "c": "SOMETHING", "d": 0.0}))
+        self.assertTrue(svc._has_meaningful_data({"a": "SomeOneReallyImportant", "b": "1", "c": "1", "d": 0.0}, N=1))
 
     def test_run_supplier_import(self):
         svc = OrderRawImportService(self.tmpfile.name, order_type="supplier")
@@ -3299,14 +2736,6 @@ class Command(BaseCommand):
         
 
 ===== /home/smaug/piat/piat-tools/exchange_rate/management/commands/import_exchange_rates.py =====
-import csv
-from datetime import datetime
-from decimal import Decimal
-from django.core.management.base import BaseCommand
-from exchange_rate.models import ExchangeRate
-
-# exchange_rate/management/commands/import_exchange_rates.py
-
 from django.core.management.base import BaseCommand
 from exchange_rate.models import ExchangeRate
 from datetime import datetime
@@ -3317,16 +2746,37 @@ class Command(BaseCommand):
     help = 'Import full exchange rate CSV (no volume)'
 
     def add_arguments(self, parser):
-        parser.add_argument('csv_file', type=str)
-        parser.add_argument('--currency',  type=str, default='THB', help='Base currency, e.g. USD or THB')
-
+        parser.add_argument(
+            'csv_file',
+            type=str,
+            help='Path to the CSV file to import'
+        )
+        parser.add_argument(
+            '--currency',
+            type=str,
+            default='THB',
+            help='Base currency code (e.g. USD or THB)'
+        )
+        parser.add_argument(
+            '--batch_size',
+            type=int,
+            default=500,
+            help='Number of entries to process per batch'
+        )
+        parser.add_argument(
+            '--verbose',
+            type=int,
+            default=0,
+            help='Verbose (0, 1)')
+        
     def handle(self, *args, **kargs):
         file_path = kargs['csv_file']
         base_currency = kargs['currency']
+        batch_size = kargs['batch_size']
+        verbose = kargs['verbose']
+        instances = []
         with open(file_path, newline='', encoding='utf-8') as csvfile:
             reader = csv.DictReader(csvfile)
-            # if '\ufeffDate' in reader.fieldnames:
-            #     reader.fieldnames = [field.replace('\ufeff', '') for field in reader.fieldnames]
             reader.fieldnames = [field.strip().replace('\ufeff', '').replace('"', '') for field in reader.fieldnames]
 
             count = 0
@@ -3337,25 +2787,44 @@ class Command(BaseCommand):
                     open_ = Decimal(row.get('Open', '0').replace(',', ''))
                     high = Decimal(row.get('High', '0').replace(',', ''))
                     low = Decimal(row.get('Low', '0').replace(',', ''))
-                    change = row.get('Change %', '').strip() if 'Change %' in row else None
-
-                    ExchangeRate.objects.update_or_create(
+                    change_percent = row.get('Change %', '').strip() if 'Change %' in row else None
+                    if ExchangeRate.objects.filter(
                         date=date,
-                        defaults={
-                            'base_currency': base_currency,
-                            'price': price,
-                            'open': open_,
-                            'high': high,
-                            'low': low,
-                            'change_percent': change,
-                            'usd_to_thb': price,
-                            'thb_to_usd': Decimal(1) / price
-                        }
-                    )
-                    count += 1
+                        base_currency=base_currency
+                    ).exists():
+                        raise ValueError(f"This exchange rate already exist : {base_currency} {date}")
+                    
+                    exchange_rate = ExchangeRate(
+                            base_currency=base_currency,
+                            date=date,
+                            price=price,
+                            open=open_,
+                            high=high,
+                            low=low,
+                            change_percent=change_percent
+                            
+                        )    
+                    instances.append(exchange_rate)
+                   
                 except Exception as e:
-                    self.stderr.write(f"Error on row {row}: {e}")
-            self.stdout.write(f"Imported {count} exchange rate entries.")
+                    if verbose > 0:
+                        self.stderr.write(self.style.WARNING(f"Error on row {row}: {e}"))
+                
+                if len(instances) > batch_size:
+                    ExchangeRate.objects.bulk_create(
+                        instances,
+                        batch_size=batch_size)
+                    count += len(instances)
+                    instances.clear()
+            if len(instances) > 0:
+                ExchangeRate.objects.bulk_create(
+                    instances,
+                    batch_size=batch_size)
+                count += len(instances)
+                instances.clear()
+                    
+            _style = self.style.SUCCESS if count>0 else self.style.ERROR
+            self.stdout.write(_style(f"Imported {count} exchange rate entries."))
 
 ===== /home/smaug/piat/piat-tools/exchange_rate/views.py =====
 from django.shortcuts import render

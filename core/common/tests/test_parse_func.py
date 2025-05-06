@@ -26,7 +26,6 @@ class ParseIntTests(SimpleTestCase):
     def test_no_digits_returns_none(self):
         self.assertIsNone(parse_int('abc'))
 
-
 class ParseDecimalTests(SimpleTestCase):
     def test_string_input(self):
         self.assertEqual(parse_decimal('1.234'), Decimal('1.234'))
@@ -35,10 +34,10 @@ class ParseDecimalTests(SimpleTestCase):
         self.assertEqual(parse_decimal(3.21), Decimal('3.21'))
 
     def test_invalid_string_returns_default(self):
-        self.assertEqual(parse_decimal('abc'), Decimal('0.0'))
+        self.assertEqual(parse_decimal('abc'), None)
 
     def test_none_returns_default(self):
-        self.assertEqual(parse_decimal(None), Decimal('0.0'))
+        self.assertEqual(parse_decimal(None), None)
 
 
 class ParseDateTests(SimpleTestCase):

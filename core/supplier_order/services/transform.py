@@ -2,16 +2,15 @@ from django.db import transaction
 
 from core.common.services.filters.mapping import FieldMappingFilter
 from core.common.services.filters.type_parsing import TypeParsingFilter
-from core.common.services.filters.context import TransformContext
+from core.common.services.filters.context import FilterContext
 from core.common.services.filters.canceled import CanceledFieldFilter
 from core.common.services.filters.required import RequiredFieldFilter
 
-from core.order_raw.models import SupplierOrderRaw
 from core.supplier_order.models import SupplierOrder
 from core.supplier_order.mapping import SUPPLIER_COLUMN_MAPPING, RAW_SUPPLIER_COLUMN_MAPPING
 from core.supplier_order.services.filters.is_purchase import IsPurchaseFilter
 
-class SupplierContext(TransformContext):
+class SupplierContext(FilterContext):
     """
     Contexte de transformation pour SupplierOrder, avec les champs attendus dans `attrs`.
     """
@@ -36,7 +35,7 @@ class SupplierOrderTransformer:
             self.unique_fields = []
 
     def transform_one(self, raw):
-        ctx = TransformContext(raw, SupplierOrder)
+        ctx = FilterContext(raw, SupplierOrder)
         try:
             for filt in self.filters:
                 if not filt.apply(ctx):
@@ -47,8 +46,15 @@ class SupplierOrderTransformer:
             ctx.error = str(e)
         return ctx
 
-    def run(self, queryset=None, batch_size=1000, error_ket_lenght=40):
-        """_summary_
+    def _manage_new_error(self, ctx, reports, error_key_lenght):
+        error_key = ctx.error[:error_key_lenght]
+        if error_key not in reports['errors']:
+            reports['errors'][error_key] = [1, f"Sheet {ctx.raw.sheet_name} - Index {ctx.raw.row_index} : {ctx.error}"]
+        else:
+            reports['errors'][error_key][0] += 1
+
+    def run(self, queryset=None, batch_size=1000, error_key_lenght=40):
+        """
 
         Args:
             queryset (_type_, optional): Iterable of SupplierOrderRaw. Defaults to None.
@@ -56,10 +62,10 @@ class SupplierOrderTransformer:
             error_ket_lenght (int, optional): Key lenght for report message error : big implies mores keys. Defaults to 40.
 
         Returns:
-            _type_: _description_
+            reports (dict) : A report of the transfer
         """
         orders_to_create = []
-        stats = {
+        reports = {
             'total_raws': 0,
             'orders_created': 0,
             'raws_failed': 0,
@@ -68,29 +74,23 @@ class SupplierOrderTransformer:
         seen_keys = set()
 
         for raw in queryset.iterator():
-            stats['total_raws'] += 1
+            reports['total_raws'] += 1
             ctx = self.transform_one(raw)
 
             if ctx.error is None:
                 # Construction de la clé de doublon depuis les champs uniques
                 key = tuple(getattr(ctx.order, f) for f in self.unique_fields)
                 if key in seen_keys:
-                    msg_error = f"Duplicated row : {key}"
-                    error_key = msg_error[:error_ket_lenght]
-                    stats['errors'][error_key] = msg_error
-                    stats['raws_failed'] += 1
+                    ctx.error = f"Duplicated row : {key}"
+                    self._manage_new_error(ctx, reports, error_key_lenght)
+                    reports['raws_failed'] += 1
                 else:
                     seen_keys.add(key)
                     orders_to_create.append(ctx.order)
-                    stats['orders_created'] += 1
+                    reports['orders_created'] += 1
             else:
-                stats['raws_failed'] += 1
-                error_key = ctx.error[:error_ket_lenght]
-                if error_key not in stats['errors']:
-                    stats['errors'][error_key] = [f"{ctx.raw.sheet_name} - {ctx.raw.row_index} : {ctx.error}", 1]
-                else:
-                    stats['errors'][error_key][1] += 1
-
+                reports['raws_failed'] += 1
+                self._manage_new_error(ctx, reports, error_key_lenght)
             # Bulk insert par batch
             if len(orders_to_create) >= batch_size:
                 if not self.dry_run:
@@ -103,4 +103,4 @@ class SupplierOrderTransformer:
             with transaction.atomic():
                 SupplierOrder.objects.bulk_create(orders_to_create, batch_size)
 
-        return stats
+        return reports

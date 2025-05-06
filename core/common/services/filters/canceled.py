@@ -6,6 +6,8 @@ from core.common.services.filters.base import BaseTransformFilter
 class CanceledFieldFilter(BaseTransformFilter):
     """ Filter row that contains a 'canceled' key word in it.
     """
+    stage = BaseTransformFilter.FilterLevel.SECOND_STAGE
+    
     def apply(self, ctx):                
         for key,val in ctx.raw.data.items():
             if val == "":

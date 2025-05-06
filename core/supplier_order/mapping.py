@@ -26,7 +26,6 @@ SUPPLIER_ORDER_FIELDS = [
     ("target_size", "Target Size"),
 ]
 
-
 RAW_SUPPLIER_COLUMN_MAPPING = {
     'client_memo':          ['Client Memo', 'Purchase (P) Memo (M) Bargain (B)', 'Purchase(P)\nMemo (M)\nBargain (B)'],
     'date':                 ['Date'],

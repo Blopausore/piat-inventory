@@ -1,6 +1,7 @@
 from django.db.models import Field
 
-class TransformContext:
+
+class FilterContext:
     def __init__(self, raw, model_class):
         self.raw = raw
         self.order = None
@@ -25,3 +26,5 @@ class TransformContext:
     def instantiate_order(self):
         self._attrs['raw'] = self.raw
         self.order = self.model_class(**self.attrs)
+
+
